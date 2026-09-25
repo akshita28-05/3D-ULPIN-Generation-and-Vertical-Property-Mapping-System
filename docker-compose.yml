@@ -1,0 +1,22 @@
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: sih_ulpin_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sih_user
+      POSTGRES_PASSWORD: sih_password
+      POSTGRES_DB: sih_ulpin
+    ports:
+      - "5432:5432"
+    volumes:
+      - sih_ulpin_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sih_user -d sih_ulpin"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  sih_ulpin_pgdata:

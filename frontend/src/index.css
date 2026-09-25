@@ -1,0 +1,178 @@
+@import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+/* ============================================================
+   DEFAULT THEME — deep teal "government dark" surface
+   This is the base look before the user toggles anything.
+   ============================================================ */
+body {
+  @apply bg-ink-950 text-slate-200 font-sans antialiased;
+  background-image:
+    radial-gradient(ellipse 70% 45% at 50% -10%, rgba(169,130,47,0.08), transparent),
+    radial-gradient(ellipse 60% 40% at 100% 100%, rgba(44,91,83,0.18), transparent);
+  background-size: auto;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #254238; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #2f5145; }
+
+.card {
+  @apply bg-ink-900/70 border border-white/5 rounded-lg backdrop-blur-sm;
+}
+
+.card-hover {
+  @apply transition-all duration-300 hover:border-brand-500/30 hover:shadow-glow;
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-md bg-brand-500 text-[#1E251C] font-semibold text-sm
+    hover:bg-brand-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-md bg-white/5 border border-white/10 text-slate-200 font-medium text-sm
+    hover:bg-white/10 transition-colors duration-200;
+}
+
+.badge {
+  @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium;
+}
+
+.input-field {
+  @apply w-full px-4 py-2.5 rounded-md bg-ink-800/80 border border-white/10 text-slate-200 placeholder-slate-500
+    focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500/50 transition-all text-sm;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.skeleton {
+  @apply animate-pulse bg-white/5 rounded-lg;
+}
+
+h1, h2, h3, .font-display {
+  letter-spacing: 0.1px;
+}
+
+/* ============================================================
+   LIGHT THEME — the government "paper & brass" look (default UX)
+   Applied via a `.light` class on <html>. Every rule here targets
+   Tailwind's own generated utility class names with an ancestor
+   selector, which is more specific than the plain utility rule, so
+   it wins without needing to touch every component file individually.
+   ============================================================ */
+.light body {
+  background-color: #F3EEE1;
+  color: #1E251C;
+  background-image:
+    radial-gradient(circle at 25% 0%, rgba(169,130,47,0.10), transparent 55%),
+    radial-gradient(circle at 100% 100%, rgba(44,91,83,0.08), transparent 50%);
+}
+
+.light ::-webkit-scrollbar-thumb { background: #D6CDB2; }
+.light ::-webkit-scrollbar-thumb:hover { background: #C3B896; }
+
+.light .card {
+  background-color: #FBF9F2;
+  border-color: #E4DCC5;
+  box-shadow: 0 1px 2px rgba(30,37,28,0.04), 0 6px 20px rgba(30,37,28,0.05);
+}
+.light .card-hover:hover { box-shadow: 0 10px 28px rgba(30,37,28,0.09); }
+
+.light .btn-secondary {
+  background-color: #FBF9F2;
+  border-color: #D6CDB2;
+  color: #3F4A3B;
+}
+.light .btn-secondary:hover { background-color: #EAE2CC; }
+
+.light .input-field {
+  background-color: #FBF9F2;
+  border-color: #D6CDB2;
+  color: #1E251C;
+}
+.light .input-field::placeholder { color: #8B9284; }
+
+.light .skeleton { background-color: rgba(30,37,28,0.06); }
+
+/* Backgrounds — dark teal surfaces -> warm paper surfaces */
+.light .bg-ink-950,
+.light .bg-ink-950\/80,
+.light .bg-ink-950\/90 { background-color: #F3EEE1; }
+
+.light .bg-ink-900,
+.light .bg-ink-900\/60,
+.light .bg-ink-900\/70,
+.light .bg-ink-900\/80,
+.light .bg-ink-900\/95 { background-color: #FBF9F2; }
+
+.light .bg-ink-800,
+.light .bg-ink-800\/80 { background-color: #EAE2CC; }
+
+/* Translucent white overlays -> warm ink tint overlays */
+.light .bg-white\/5 { background-color: rgba(30,37,28,0.035); }
+.light .bg-white\/10 { background-color: rgba(30,37,28,0.06); }
+.light .hover\:bg-white\/5:hover { background-color: rgba(30,37,28,0.045); }
+.light .hover\:bg-white\/10:hover { background-color: rgba(30,37,28,0.07); }
+
+.light .border-white\/5 { border-color: #E9E1CB; }
+.light .border-white\/10 { border-color: #E0D7BE; }
+.light .divide-white\/5 > * + * { border-color: #E9E1CB; }
+
+/* Text — bright-on-dark palette -> ink-on-paper palette */
+.light .text-white { color: #171D14; }
+.light .hover\:text-white:hover { color: #171D14; }
+.light .text-slate-200 { color: #22291F; }
+.light .text-slate-300 { color: #3A4335; }
+.light .text-slate-400 { color: #5C6355; }
+.light .text-slate-500 { color: #767C6B; }
+.light .text-slate-600 { color: #8B9284; }
+.light .text-slate-700 { color: #A4AA98; }
+.light .placeholder-slate-500::placeholder { color: #9AA091; }
+
+.light .shadow-glow { box-shadow: 0 12px 30px rgba(169,130,47,0.14); }
+
+/* Status accent tints stay legible on paper */
+.light .bg-rose-500\/5 { background-color: rgba(156,64,42,0.06); }
+.light .bg-rose-500\/10 { background-color: rgba(156,64,42,0.10); }
+.light .border-rose-500\/15 { border-color: rgba(156,64,42,0.20); }
+.light .border-rose-500\/20 { border-color: rgba(156,64,42,0.28); }
+.light .text-rose-400 { color: #9C402A; }
+
+.light .bg-emerald-500\/5 { background-color: rgba(75,115,85,0.07); }
+.light .bg-emerald-500\/10 { background-color: rgba(75,115,85,0.12); }
+.light .border-emerald-500\/15 { border-color: rgba(75,115,85,0.22); }
+.light .border-emerald-500\/20 { border-color: rgba(75,115,85,0.3); }
+.light .text-emerald-400 { color: #4B7355; }
+
+.light .bg-amber-500\/5 { background-color: rgba(169,130,47,0.07); }
+.light .bg-amber-500\/10 { background-color: rgba(169,130,47,0.12); }
+.light .border-amber-500\/15 { border-color: rgba(169,130,47,0.2); }
+.light .border-amber-500\/20 { border-color: rgba(169,130,47,0.28); }
+.light .text-amber-400 { color: #A9822F; }
+
+/* Overlays drawn on top of the (always dark) map keep light text in the light theme too */
+.light .map-overlay .text-slate-100, .light .map-overlay .text-slate-200 { color: #E2E8F0; }
+.light .map-overlay .text-slate-300 { color: #CBD5E1; }
+.light .map-overlay .text-slate-400, .light .map-overlay .text-slate-500 { color: #94A3B8; }
+.light .map-overlay .text-slate-600 { color: #64748B; }
+.light .map-overlay .text-white { color: #FFFFFF; }

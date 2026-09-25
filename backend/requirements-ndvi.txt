@@ -1,0 +1,2 @@
+rasterio==1.3.11   # reads Sentinel-2 L2A red/NIR COG bands directly over HTTPS (/vsicurl/)
+numpy==1.26.4      # NDVI arithmetic over the read window

@@ -1,0 +1,12 @@
+
+transformers==4.46.2   # SegFormer building footprint -- DEFAULT footprint backend (see ai/footprint/extractor.py, FOOTPRINT_MODEL_BACKEND)
+torch==2.4.1            # backend for both SegFormer and YOLOv8-seg
+opencv-python-headless==4.10.0.84  # connected components + contour extraction for SegFormer's per-pixel mask
+ultralytics==8.3.28    # YOLOv8-seg building footprint (optional alternate backend), surface utility assets, GPR hyperbola detection
+laspy[lazrs]==2.5.4     # LAS/LAZ LiDAR point cloud reading (aerial + basement + registration)
+numpy==1.26.4
+scipy==1.13.1         # cKDTree nearest-neighbour search for ICP registration (ai/registration/alignment.py)
+scikit-learn==1.5.2   # DBSCAN clustering for GPR detection fusion (ai/underground/fusion.py)
+rasterio==1.3.11      # reads Copernicus GLO-30 / OpenTopography DEM GeoTIFFs (ai/heights/ndsm_estimator.py)
+boto3==1.35.36        # anonymous S3 access to the public Copernicus GLO-30 bucket (same file)
+shapely==2.0.6        # already in requirements.txt -- listed here too since ndsm_estimator.py imports it directly
