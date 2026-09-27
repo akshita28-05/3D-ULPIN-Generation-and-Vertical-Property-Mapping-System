@@ -32,8 +32,8 @@ MAX_CLOUD_POINTS = int(os.getenv("CORRIDOR_MAX_CLOUD_POINTS", "3000000"))
 
 class CorridorDetectRequest(BaseModel):
     use_osm: bool = True
-    point_cloud_dataset_id: Optional[str] = None
-    margin_m: float = 60.0
+    point_cloud_dataset_id: Optional[str] = None  # a Dataset(dataset_type='point_cloud') already in the parcel's local metre frame
+    margin_m: float = 60.0                          # look this far beyond the parcel edge
     commit: bool = False
 
 
@@ -102,6 +102,7 @@ def detect_corridors(
         else:
             evidence["osm"] = f"ok ({len(elements)} elements)"
             osm_corr = osm_detector.classify_elements(elements, origin)["corridors"]
+            # keep only corridors whose outline comes within `margin` of the parcel
             def _near(c):
                 px = [q[0] for q in c["polygon_local"]]; py = [q[1] for q in c["polygon_local"]]
                 return not (max(px) < min(xs) - m or min(px) > max(xs) + m or max(py) < min(ys) - m or min(py) > max(ys) + m)
@@ -111,7 +112,10 @@ def detect_corridors(
     if payload.point_cloud_dataset_id:
         blds = db.query(models.Building).filter(models.Building.parcel_id == parcel.id).all()
         cloud = _load_cloud(db, payload.point_cloud_dataset_id)
-        lidar = lidar_detector.detect_elevated_structures(cloud, building_footprints=[parse_points(b.footprint_geojson) for b in blds if b.footprint_geojson])
+        try:
+            lidar = lidar_detector.detect_elevated_structures(cloud, building_footprints=[parse_points(b.footprint_geojson) for b in blds if b.footprint_geojson])
+        except ImportError:
+            raise HTTPException(status_code=501, detail="scipy not installed (pip install -r requirements-ml.txt)")
         evidence["lidar"] = f"ok ({len(lidar)} elevated structures; cloud assumed to be in the parcel's local metre frame)"
     if evidence["osm"].startswith("unavailable") and not lidar:
         raise HTTPException(status_code=503, detail=f"No evidence source available. OSM: {evidence['osm']}. Upload a point cloud or retry.")

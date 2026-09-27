@@ -16,13 +16,39 @@ Method (no trained model, all numpy/scipy):
 Limits (read before demoing): the outline is an oriented rectangle, so a sharply
 curved viaduct is over-approximated; tested on synthetic clouds only.
 """
+import logging
+
 import numpy as np
-from scipy import ndimage
 
 from . import geom2d
 
+logger = logging.getLogger("landsphere.ai.corridors.lidar")
+
 DEFAULT_DEPTH = {"metro": 2.5, "elevated_rail": 2.5, "flyover": 1.8, "elevated_road": 1.8, "unclassified_elevated": 2.0}
 ENVELOPE = {"metro": 6.0, "elevated_rail": 6.0, "flyover": 5.5, "elevated_road": 5.5, "unclassified_elevated": 3.0}
+
+# scipy is only needed for this one aerial-LiDAR path (everything else in ai/corridors is numpy-only),
+# so -- same pattern as ai/heights/ndsm_estimator.py and ai/vegetation/ndvi_check.py -- it's imported
+# lazily here rather than at module load. Without it (no `requirements-ml.txt` installed) OSM-only
+# corridor detection still runs; only a point cloud upload falls back to "not available" instead of
+# crashing the whole app at import time.
+_NDIMAGE = None
+
+
+def _ndimage():
+    global _NDIMAGE
+    if _NDIMAGE is None:
+        try:
+            from scipy import ndimage
+            _NDIMAGE = ndimage
+        except ImportError as exc:
+            logger.warning(
+                f"Aerial-LiDAR elevated-structure detection needs scipy "
+                f"(pip install -r requirements-ml.txt) -- missing: {exc}. "
+                f"OSM-based corridor detection is unaffected."
+            )
+            raise
+    return _NDIMAGE
 
 
 def detect_elevated_structures(points, building_footprints=(), ground_z=None, cell=1.0,
@@ -32,6 +58,7 @@ def detect_elevated_structures(points, building_footprints=(), ground_z=None, ce
     pts = np.asarray(points, float)
     if pts.ndim != 2 or pts.shape[0] < 500:
         return []
+    ndimage = _ndimage()
     x0, y0 = pts[:, 0].min(), pts[:, 1].min()
     ix = ((pts[:, 0] - x0) / cell).astype(int); iy = ((pts[:, 1] - y0) / cell).astype(int)
     W, H = ix.max() + 1, iy.max() + 1
@@ -47,6 +74,7 @@ def detect_elevated_structures(points, building_footprints=(), ground_z=None, ce
     for k, s, e in zip(uniq, start, end):
         a, b = divmod(int(k), H)
         seg = zs[s:e]
+        # top-surface statistics: use the upper cluster (points within 1 m of max)
         t = seg.max(); up = seg[seg >= t - 1.0]
         ztop[a, b] = np.median(up); zstd[a, b] = up.std(); zmin[a, b] = seg.min(); cnt[a, b] = e - s
 
@@ -80,6 +108,11 @@ def detect_elevated_structures(points, building_footprints=(), ground_z=None, ce
             continue
         tops = ztop[cells[:, 0], cells[:, 1]]; grd = ground[cells[:, 0], cells[:, 1]]
         deck_top = float(np.median(tops)); ground_m = float(np.median(grd))
+        # what is beneath the deck? (a) ground returns under a big vertical gap =>
+        # open underneath (a real viaduct/flyover, not an embankment or solid block);
+        # (b) if the upper cluster is >= 1 m thick (underside returns exist -- mobile /
+        # oblique / multi-return scan) the underside is MEASURED. A top-only aerial
+        # scan cannot see the underside, so then depth stays an assumption.
         sample = cells[:: max(1, len(cells) // 200)]
         open_n, unders = 0, []
         for a, b in sample:
