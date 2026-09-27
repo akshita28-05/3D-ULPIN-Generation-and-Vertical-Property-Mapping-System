@@ -4,7 +4,10 @@ import axios from 'axios'
 // relative path works with no env var set. In production (Vercel), there is no
 // backend on the same domain to proxy to, so VITE_API_URL must point straight at
 // the deployed Render backend, e.g. VITE_API_URL=https://your-app.onrender.com
-const API_BASE = `${import.meta.env.VITE_API_URL || ''}/api`
+// Trimmed and stripped of any trailing slash here so a stray trailing space/newline
+// or slash on the env var can never combine with the leading '/api' below into a
+// double slash -- FastAPI treats '//api/...' as a different (404) path from '/api/...'.
+const API_BASE = `${(import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '')}/api`
 
 const api = axios.create({ baseURL: API_BASE })
 
