@@ -32,18 +32,47 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 logger = logging.getLogger(__name__)
 
+# This file lives at <backend>/app/database.py -- BACKEND_DIR is always
+# <backend>, regardless of which directory the CURRENT PROCESS happened
+# to be launched/run from.
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Default: local Postgres+PostGIS via docker-compose.yml at the repo root
+# (POSTGRES_USER=sih_user, POSTGRES_PASSWORD=sih_password, POSTGRES_DB=sih_ulpin,
+# published on the default port 5432 -- see that file / README "Database" section).
 _DEFAULT_DATABASE_URL = "postgresql://sih_user:sih_password@localhost:5432/sih_ulpin"
 
 _raw_database_url = os.getenv("DATABASE_URL", _DEFAULT_DATABASE_URL)
 
+# Render (and Heroku before it) hand out managed Postgres URLs starting "postgres://",
+# a scheme SQLAlchemy 1.4+ no longer recognises on its own (raises NoSuchModuleError).
+# Normalise it to "postgresql://" so pasting Render's "External Database URL" straight
+# into DATABASE_URL just works.
+if _raw_database_url.startswith("postgres://"):
+    _raw_database_url = "postgresql://" + _raw_database_url[len("postgres://"):]
+
 if _raw_database_url.startswith("sqlite:///.") and not _raw_database_url.startswith("sqlite:////"):
-    relative_part = _raw_database_url.split("sqlite:///", 1)[1]
+    # A RELATIVE sqlite path resolves against the process's current
+    # working directory -- which silently differs between "cd backend
+    # && uvicorn app.main:app" and "python scripts/load_ms_footprints.py"
+    # run from a different folder (or a different terminal/IDE run
+    # config). Two different physical .db files result, so anything a
+    # script loads never appears in the running app -- indistinguishable,
+    # from the app's side, from "that quadkey file doesn't cover this
+    # area". Anchoring the relative part to BACKEND_DIR instead makes
+    # every process resolve to the exact same file no matter its own cwd.
+    # (An explicit absolute DATABASE_URL, sqlite:////abs/path, or a
+    # non-sqlite URL bypasses this and is used exactly as given.)
+    relative_part = _raw_database_url.split("sqlite:///", 1)[1]  # e.g. "./sih_ulpin.db" -> keep as given
     DATABASE_URL = f"sqlite:///{os.path.normpath(os.path.join(BACKEND_DIR, relative_part))}"
 else:
     DATABASE_URL = _raw_database_url
 
+# Whether this process is running against a Postgres+PostGIS backend. Used
+# by models.py to conditionally attach real geoalchemy2.Geometry columns
+# (SQLite has no PostGIS DDL support, so the fallback path keeps using the
+# plain JSON-text geometry columns instead). See ARCHITECTURE.md /
+# scripts/migrate_to_postgis.py for the full migration notes.
 IS_POSTGIS = DATABASE_URL.startswith("postgresql")
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -66,7 +95,7 @@ def _ensure_postgis_extension():
     try:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- deliberately non-fatal, see docstring
         logger.warning(
             "Could not auto-enable the postgis extension (%s). If it isn't already "
             "enabled on this database, spatial columns/queries will fail -- run "

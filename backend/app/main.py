@@ -27,19 +27,32 @@ app = FastAPI(
     version="1.0.0",
 )
 
+import os
+
+# Set CORS_ALLOWED_ORIGINS on Render to your Vercel URL(s), comma-separated
+# (e.g. "https://vasudha3d.vercel.app,https://vasudha3d-git-main.vercel.app").
+# Falls back to "*" (any origin) so local dev and a first deploy work with nothing set.
+_cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+_allowed_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Gzip-compresses responses over 1KB -- meaningfully cuts bandwidth for
+# larger JSON payloads (e.g. a parcel with many floors/units, or the
+# audit log) under concurrent load, and speeds up response time for
+# users on slower connections.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Never leak raw stack traces — return a clean, friendly error shape
     return JSONResponse(status_code=422, content={"detail": "Invalid request data", "errors": exc.errors()})
 
 
@@ -68,14 +81,18 @@ app.include_router(interop_router.router)
 app.include_router(detection_router.router)
 app.include_router(infra_router.router)
 
-import os as _os
-from fastapi.staticfiles import StaticFiles
-from .routers.tiles_router import TILES_DIR
+# Serves generated 3D Tiles tilesets (tileset.json + per-building .glb)
+# straight from disk -- a CesiumJS Cesium3DTileset can point directly at
+# /tiles/{parcel_id}/tileset.json. Mounted after all API routers so it
+# never shadows an /api/... path.
+import os as _os  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from .routers.tiles_router import TILES_DIR  # noqa: E402
 
 _os.makedirs(TILES_DIR, exist_ok=True)
 app.mount("/tiles", StaticFiles(directory=TILES_DIR), name="tiles")
 
-from . import change_detection_scheduler
+from . import change_detection_scheduler  # noqa: E402
 
 
 @app.on_event("startup")

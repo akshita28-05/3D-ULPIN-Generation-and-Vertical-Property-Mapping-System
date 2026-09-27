@@ -1,6 +1,12 @@
 import axios from 'axios'
 
-const api = axios.create({ baseURL: '/api' })
+// In dev, Vite's proxy (vite.config.js) forwards '/api' to localhost:8000, so the
+// relative path works with no env var set. In production (Vercel), there is no
+// backend on the same domain to proxy to, so VITE_API_URL must point straight at
+// the deployed Render backend, e.g. VITE_API_URL=https://your-app.onrender.com
+const API_BASE = `${import.meta.env.VITE_API_URL || ''}/api`
+
+const api = axios.create({ baseURL: API_BASE })
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('access_token')
@@ -17,7 +23,7 @@ api.interceptors.response.use(
       const refreshToken = localStorage.getItem('refresh_token')
       if (refreshToken) {
         try {
-          const { data } = await axios.post('/api/auth/refresh', { refresh_token: refreshToken })
+          const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refresh_token: refreshToken })
           localStorage.setItem('access_token', data.access_token)
           localStorage.setItem('refresh_token', data.refresh_token)
           original.headers.Authorization = `Bearer ${data.access_token}`
