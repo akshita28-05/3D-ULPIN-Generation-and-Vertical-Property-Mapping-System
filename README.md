@@ -1,6 +1,6 @@
 # Vasudha 3D — 3D ULPIN Generation & Vertical Property Mapping System
 
-https://vasudha3d-jqv5jynyx-vaishnavi944.vercel.app/
+https://vasudha3d.vercel.app/
 
 A prototype for SIH26011: a system that gives surface parcels, multi-storey
 units, underground infrastructure, and air-rights corridors their own
