@@ -25,6 +25,7 @@ const LAYER_DEFS = [
   { key: 'airRights', label: 'Air-rights', icon: Plane },
 ]
 
+// One look for every toolbar button: quiet by default, brass when active.
 const toolBtn = (active) =>
   `flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
     active ? 'bg-brand-500 text-ink-950' : 'text-slate-300 hover:text-white hover:bg-white/5'
@@ -39,10 +40,15 @@ export default function Viewer3D() {
   const isAdmin = user?.role === 'admin'
   const [mode, setMode] = useState('3d')
   const [exploded, setExploded] = useState(false)
+  // 'detailed' = window/balcony/roof-tank facade model (BHU-3D look); 'volumes' = the plain translucent floor slabs.
   const [buildingStyle, setBuildingStyle] = useState('detailed')
-  const [sceneTheme, setSceneTheme] = useState('dark')
+  const [sceneTheme, setSceneTheme] = useState('dark') // 'dark' (navy + cyan grid) | 'light' (original cream)
+  // Underground + air-rights start ON: they are the point of the vertical-cadastre view, and with none
+  // found the legend says so instead of leaving an unexplained empty scene.
   const [layers, setLayers] = useState({ parcel: true, buildings: true, units: true, underground: true, airRights: true })
-  const [infraState, setInfraState] = useState('idle')
+  // Nearby underground / air-right structures come from their own request (an open-data scan can take
+  // a while the first time an area is opened), so the building never waits for it.
+  const [infraState, setInfraState] = useState('idle')   // idle | loading | done | error
   const [infraScan, setInfraScan] = useState(null)
   const [selected, setSelected] = useState(null)
   const [selectedDetail, setSelectedDetail] = useState(null)
@@ -52,14 +58,25 @@ export default function Viewer3D() {
   const [addressSearching, setAddressSearching] = useState(false)
   const [sectionEnabled, setSectionEnabled] = useState(false)
   const [sectionHeight, setSectionHeight] = useState(0)
+  // Toolbar/Layers/parcel-info are overlays on top of the 3D canvas, but
+  // on a small building or a narrow window they can end up covering most
+  // of what little the scene shows -- these let the person collapse them
+  // instead of them being permanently "static" fixtures on the screen.
   const [uiHidden, setUiHidden] = useState(false)
   const [layersCollapsed, setLayersCollapsed] = useState(false)
   const [params] = useSearchParams()
   const navigate = useNavigate()
   const sceneRef = useRef(null)
+  // "Open Full Inspector" from the bulk area view can ask to land directly
+  // on one specific building (not just its parcel) via ?building=<id> --
+  // applied once, the first time the matching parcel finishes loading, so
+  // it doesn't keep overriding whatever the person has since clicked on.
   const focusBuildingId = params.get('building')
   const appliedBuildingFocusRef = useRef(false)
 
+  // Load the list of every parcel that exists (newest first, per the
+  // backend ordering) so nothing created after the page first loaded is
+  // ever hidden behind a hardcoded "first parcel" assumption.
   useEffect(() => {
     async function loadParcelList() {
       setLoading(true)
@@ -67,10 +84,30 @@ export default function Viewer3D() {
         const { data } = await api.get('/parcels', { params: { limit: 5000 } })
         setAllParcels(data)
         const focusParam = params.get('focus')
+        // App-wide convention (see Search.jsx / GisMap.jsx): "type:id",
+        // e.g. "parcel:abc123". This page only ever focuses a parcel, so
+        // only the parcel: prefix is resolved here -- a unit/building/floor
+        // focus falls back to the newest-parcel default below rather than
+        // silently mis-selecting the wrong parcel.
         const focusId = focusParam?.startsWith('parcel:') ? focusParam.slice('parcel:'.length) : focusParam
         if (focusId) {
+          // Trust the id directly rather than requiring it to appear in
+          // `data` above -- GET /parcels defaults to the newest 100 rows
+          // (see list_parcels()'s default limit in parcels_router.py), so
+          // a parcel that legitimately exists but isn't in that newest-100
+          // slice (e.g. one of 223 parcels from a bulk-import job, sitting
+          // behind other more-recently-created parcels) used to fail this
+          // membership check and silently fall back to some unrelated
+          // parcel below -- landing "Open Full Inspector" on the wrong
+          // building even though the link itself was correct. The detail
+          // fetch below (GET /parcels/{id}) looks this id up directly by
+          // primary key, uncapped, so membership in this list was never
+          // actually required -- and if the id turns out not to exist at
+          // all, that fetch's own catch block falls back to the newest
+          // parcel instead.
           setSelectedParcelId(focusId)
         } else if (data.length > 0) {
+          // Default to the most recently created parcel (data is newest-first).
           setSelectedParcelId(data[0].id)
         }
       } finally {
@@ -80,12 +117,25 @@ export default function Viewer3D() {
     loadParcelList()
   }, [])
 
+  // Load full detail (buildings/floors/units + underground/air-rights) for
+  // a given parcel id. Hoisted out of the effect below (rather than
+  // defined inline inside it) so it can also be called again after a
+  // building delete, to refresh the panel without a full page reload.
   async function loadParcelDetail(parcelId) {
     setLoading(true)
     try {
       const [parcelRes, underground, airRights, conflictsRes] = await Promise.all([
         api.get(`/parcels/${parcelId}`),
-        api.get('/underground-assets'), api.get('/air-rights'),
+        // Filtered server-side now (parcel_id=) -- this used to fetch EVERY underground asset and
+        // air-right corridor in the whole database on every single parcel view, then throw away
+        // every row that wasn't this parcel's. Harmless with a handful of parcels; got slower with
+        // every bulk import since.
+        api.get('/underground-assets', { params: { parcel_id: parcelId } }),
+        api.get('/air-rights', { params: { parcel_id: parcelId } }),
+        // Topology/AI-vs-manual conflict checks (GET /api/review/conflicts)
+        // require sign-in -- an anonymous citizen viewer gets a 401, which
+        // is caught here instead of surfacing as an error, so the public
+        // page still loads normally, just without conflict data.
         api.get('/review/conflicts').catch((err) => ({
           data: [], restricted: err?.response?.status === 401 || err?.response?.status === 403,
         })),
@@ -93,6 +143,9 @@ export default function Viewer3D() {
       const p = parcelRes.data
       p.undergroundAssets = underground.data.filter((a) => a.parcel_id === p.id)
       p.airRights = airRights.data.filter((a) => a.parcel_id === p.id)
+      // Scope the (otherwise global) unresolved-conflicts list down to
+      // just this parcel's buildings/units, so building/floor/unit
+      // panels only ever show conflicts that are actually theirs.
       const buildingIds = new Set(p.buildings.map((b) => b.id))
       const unitIds = new Set(p.buildings.flatMap((b) => b.floors.flatMap((f) => f.units.map((u) => u.id))))
       p.conflicts = (conflictsRes.data || []).filter(
@@ -107,8 +160,22 @@ export default function Viewer3D() {
       setSectionHeight(maxH)
       setSectionEnabled(false)
 
+      // A directly-focused parcel (see loadParcelList's focusId handling
+      // above) may not be among the newest-100 GET /parcels returned, so
+      // the selector dropdown wouldn't otherwise list it -- add it in so
+      // the dropdown's displayed value actually matches what's on screen.
       setAllParcels((prev) => (prev.some((ap) => ap.id === p.id) ? prev : [{ id: p.id, ulpin: p.ulpin, address: p.address }, ...prev]))
 
+      // Bulk-imported/newly-created parcels routinely have no `address`
+      // column set at all -- but their real centroid_lat/lon is enough to
+      // resolve a real street address via the same reverse-geocode the
+      // ParcelInfoCard already uses for Village/Tehsil/District. Without
+      // this, the parcel selector and building panels showed a bare
+      // "No address"/"Not on record" even when a real address was one
+      // lookup away. This is real Nominatim output (same honesty rule as
+      // the rest of the geocode integration) -- never a fabricated
+      // string -- and it's display-only here (not written back to the
+      // Parcel row); an officer can still enter/correct it manually.
       if (!p.address && p.centroid_lat != null && p.centroid_lon != null) {
         api.get('/geocode/reverse', { params: { lat: p.centroid_lat, lon: p.centroid_lon } })
           .then(({ data }) => {
@@ -116,9 +183,14 @@ export default function Viewer3D() {
             setParcel((prev) => (prev && prev.id === p.id ? { ...prev, address: data.display_name } : prev))
             setAllParcels((prev) => prev.map((ap) => (ap.id === p.id ? { ...ap, address: data.display_name } : ap)))
           })
-          .catch(() => {   })
+          .catch(() => { /* lookup unavailable -- leave address blank rather than guess */ })
       }
     } catch (err) {
+      // A stale/bad focus= link (parcel id that plain doesn't exist,
+      // e.g. deleted or from a reseeded database) 404s here -- fall back
+      // to the newest known parcel instead of leaving the page stuck with
+      // no parcel loaded at all. Guarded against re-triggering itself if
+      // even that fallback somehow fails.
       const fallbackId = allParcels[0]?.id
       if (fallbackId && fallbackId !== parcelId) {
         setSelectedParcelId(fallbackId)
@@ -135,6 +207,11 @@ export default function Viewer3D() {
     loadParcelDetail(selectedParcelId)
   }, [selectedParcelId])
 
+  // Real underground structures + air-right corridors around this parcel (OpenStreetMap-derived, the
+  // same store the map layers draw), returned in the parcel's own frame -- including ones that run
+  // beside the parcel rather than through it. Step 1 is instant (already-scanned data); step 2 scans
+  // any not-yet-scanned open-data cells and only re-renders the scene if that actually added something,
+  // so the camera doesn't jump for nothing.
   async function loadInfra(parcelId) {
     setInfraState('loading')
     setInfraScan(null)
@@ -152,6 +229,11 @@ export default function Viewer3D() {
     }
   }
 
+  // Once the focused parcel's real detail (with its buildings) has loaded,
+  // select the specific building requested via ?building=<id> so the 3D
+  // view frames tightly on it (see ThreeScene's computeFrame) and its
+  // floors/units panel opens immediately -- same experience as clicking
+  // that building's card by hand, just automatic on arrival.
   useEffect(() => {
     if (!parcel || !focusBuildingId || appliedBuildingFocusRef.current) return
     const b = parcel.buildings?.find((x) => x.id === focusBuildingId)
@@ -162,6 +244,15 @@ export default function Viewer3D() {
     }
   }, [parcel, focusBuildingId])
 
+  // After deleting the whole parcel (not just a building within it), there
+  // is no parcel left to reload -- drop it from the list and select
+  // whatever's next, same "pick the newest remaining one" default as the
+  // initial load.
+  // Applies a just-saved building/parcel edit straight to local state
+  // (both the loaded `parcel` and, if it's the open panel, `selectedDetail`)
+  // instead of a full reload -- a reload would call loadParcelDetail's own
+  // setSelectedDetail(null)/setSelected(null) reset and close the panel
+  // right after the person just saved something in it.
   function applyLocalEdits({ buildingId, buildingPatch, parcelPatch }) {
     setParcel((prev) => {
       if (!prev) return prev
@@ -195,6 +286,9 @@ export default function Viewer3D() {
     setSelected(hit)
     if (hit.type === 'unit') {
       if (hit.seeded) {
+        // Estimated unit -- no server record exists for a seed-unit-* id
+        // (GET /units/{id} would 404), so the estimated object bundled
+        // onto the mesh's userData in ThreeScene.jsx is used directly.
         setSelectedDetail({ kind: 'unit', data: { ...hit.unitData, buildingId: hit.buildingId, seeded: true } })
         return
       }
@@ -207,6 +301,11 @@ export default function Viewer3D() {
       setSelectedDetail({ kind: 'building', data: b })
     } else if (hit.type === 'floor') {
       if (hit.seeded) {
+        // Same reasoning as the seeded-unit branch above -- seed-floor-*
+        // ids only ever existed client-side in ThreeScene.jsx's
+        // seedFloors(), so parcel.buildings[].floors[] has no matching
+        // row to find. Build the detail straight from what was bundled
+        // onto the mesh.
         setSelectedDetail({
           kind: 'floor',
           data: {
@@ -243,6 +342,11 @@ export default function Viewer3D() {
     setLayers((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
+  // Real address search-as-you-type against GET /api/geocode/search
+  // (OpenStreetMap Nominatim) -- debounced so it isn't fired on every
+  // keystroke. This looks up REAL places; it does not search seeded
+  // parcel data, since the person may be looking for an address that
+  // doesn't have a parcel in the system yet.
   useEffect(() => {
     if (addressQuery.trim().length < 3) {
       setAddressResults([])
@@ -262,12 +366,16 @@ export default function Viewer3D() {
     return () => clearTimeout(handle)
   }, [addressQuery])
 
+  // If the searched address matches an existing parcel closely enough,
+  // jump to it; otherwise just recenter the map view on the real
+  // coordinates Nominatim returned (still real data, just not one of
+  // ours yet).
   function handleAddressResultClick(result) {
     const nearest = allParcels.find((p) => {
       if (p.centroid_lat == null || p.centroid_lon == null) return false
       const dLat = Math.abs(p.centroid_lat - result.lat)
       const dLon = Math.abs(p.centroid_lon - result.lon)
-      return dLat < 0.0015 && dLon < 0.0015
+      return dLat < 0.0015 && dLon < 0.0015 // ~150m
     })
     if (nearest) {
       setSelectedParcelId(nearest.id)
@@ -296,7 +404,11 @@ export default function Viewer3D() {
         </div>
       )}
 
-      { }
+      {/* An empty parcel (real record, just nothing built on it yet --
+          e.g. straight off a bulk import) still renders its faint ground
+          plate/grid underneath this, which reads as a plain blank canvas
+          at a glance. This makes that distinction explicit instead of
+          leaving it looking like the 3D view itself failed to load. */}
       {!loading && parcel && parcel.buildings?.length === 0 && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 text-sm z-10 gap-3 pointer-events-none">
           <span>No buildings recorded on this parcel yet.</span>
@@ -308,7 +420,10 @@ export default function Viewer3D() {
         </div>
       )}
 
-      { }
+      {/* ThreeScene fills in an estimated floor-by-floor breakdown (see
+          seedFloors() there) for any building with no real Floor rows yet,
+          so the view isn't just one flat shell -- flagged here rather than
+          silently, so it's never mistaken for a completed survey. */}
       {!loading && parcel?.buildings?.some((b) => !b.floors?.length) && (
         <div className="absolute bottom-4 left-4 z-10 pointer-events-none">
           <div className="card px-3 py-2 text-[11px] text-slate-400 bg-ink-900/85 max-w-[240px] leading-relaxed">
@@ -333,6 +448,7 @@ export default function Viewer3D() {
         sceneTheme={sceneTheme}
       />
 
+      {/* Top bar: parcel picker + view tools on the left, view mode + search on the right */}
       {!uiHidden && (
       <div className="absolute top-4 left-4 right-4 z-10 flex items-center gap-2 pointer-events-none">
         <div className="flex items-center gap-2 min-w-0 pointer-events-auto">
@@ -385,6 +501,7 @@ export default function Viewer3D() {
             <button onClick={() => setMode('2d')} className={toolBtn(mode === '2d')}><MapIcon size={14} /> 2D</button>
           </div>
 
+          {/* Real-time address search (OpenStreetMap Nominatim, not seeded data) */}
           <div className="relative">
             <button
               onClick={() => setShowAddressSearch((v) => !v)}
@@ -430,14 +547,14 @@ export default function Viewer3D() {
       </div>
       )}
 
-      { }
+      {/* Parcel details: one slim strip along the top instead of a floating card on the right */}
       {!uiHidden && parcel && !selectedDetail && (
         <div className="absolute top-[4.25rem] left-4 right-4 z-10 hidden md:block pointer-events-none">
           <ParcelInfoCard variant="strip" parcel={parcel} onViewFullDetails={() => handleSelect({ type: 'parcel', id: parcel.id })} />
         </div>
       )}
 
-      { }
+      {/* Left column: layers, then what the underground / air-right layers are showing */}
       {!uiHidden && (
       <div className="absolute top-[7.5rem] left-4 bottom-20 z-10 w-60 hidden sm:flex flex-col gap-2 pointer-events-none">
         <div className="card p-2 pointer-events-auto flex-shrink-0">
@@ -476,7 +593,7 @@ export default function Viewer3D() {
       </div>
       )}
 
-      { }
+      {/* Mobile layer toggle strip */}
       {!uiHidden && (
       <div className="absolute bottom-4 left-4 right-20 sm:hidden flex gap-2 overflow-x-auto pointer-events-auto pb-1">
         {LAYER_DEFS.map((l) => (
@@ -493,8 +610,9 @@ export default function Viewer3D() {
       </div>
       )}
 
-      { }
+      {/* Zoom / camera controls */}
       <div className="absolute bottom-4 right-4 flex items-end gap-2 pointer-events-auto z-10">
+        {/* Directional pad — full free rotation up/down/left/right */}
         <div className="card p-1.5 grid grid-cols-3 grid-rows-3 gap-0.5 w-[108px] h-[108px]">
           <div />
           <button onClick={() => sceneRef.current?.rotate('vertical', -0.28)} aria-label="Rotate up" className="flex items-center justify-center rounded-lg text-slate-300 hover:text-brand-400 hover:bg-white/5"><ChevronUp size={16} /></button>
@@ -533,6 +651,10 @@ export default function Viewer3D() {
         </div>
       </div>
 
+      {/* Vertical section/slice tool — a real Three.js clipping plane
+          (see ThreeScene.jsx) that discards geometry above the chosen
+          height, for inspecting floors/basements and their overlaps,
+          not a static image. */}
       {mode === '3d' && parcel?.buildings?.length > 0 && (
         <div className="absolute bottom-4 left-4 z-10 pointer-events-auto">
           <div className="card p-3 flex items-center gap-3">
@@ -560,7 +682,7 @@ export default function Viewer3D() {
         </div>
       )}
 
-      { }
+      {/* Selection panel */}
       {selectedDetail && (
         <div className="absolute top-0 right-0 h-full w-full sm:w-96 bg-ink-900/95 backdrop-blur-lg border-l border-white/10 overflow-y-auto animate-fade-in z-10">
           <SelectionPanel
@@ -582,6 +704,11 @@ function SelectionPanel({ detail, parcel, onClose, navigate, isAdmin, onSelect, 
   const conflictsRestricted = !!parcel?.conflictsRestricted
   const [deleting, setDeleting] = useState(false)
 
+  // Real, persisted edit -- not a placeholder overlay. Saves straight to
+  // the database (PATCH /buildings/{id} for the name, PATCH
+  // /parcels/{id} for the address, both existing endpoints), so once
+  // saved it shows up everywhere else that reads the same records too
+  // (search, the admin dashboard/All Records, etc), not just here.
   const [editingBuilding, setEditingBuilding] = useState(false)
   const [editName, setEditName] = useState('')
   const [editAddress, setEditAddress] = useState('')
@@ -722,6 +849,15 @@ function SelectionPanel({ detail, parcel, onClose, navigate, isAdmin, onSelect, 
       {kind === 'building' && (() => {
         const footprintPts = safeParseGeojson(data.footprint_geojson)
         const footprintArea = polygonArea(footprintPts)
+        // A freshly ML-detected building genuinely has no surveyed
+        // num_floors/height_m yet (0 / null on the record -- see the
+        // "never invent data" rule that runs through the backend's
+        // footprint/floor pipeline). Rather than a bare "0" or blank,
+        // fall back to a per-building estimate (see buildingEstimate.js --
+        // varies with this building's own real footprint area/id, not a
+        // flat number every unsurveyed building shares) -- clearly
+        // labeled as an estimate, never written back to the record, so
+        // it can't be mistaken for a real survey result anywhere else.
         const estimate = estimateBuildingDimensions(data)
         const isUnsurveyed = estimate.estimated
         const displayFloors = estimate.floors
@@ -908,6 +1044,11 @@ function SelectionPanel({ detail, parcel, onClose, navigate, isAdmin, onSelect, 
           (c) => c.check_type === 'unit_overlap'
             && data.units?.some((u) => c.unit_id === u.id || c.message?.includes(u.ulpin_3d)),
         )
+        // Length/breadth: the footprint's own bounding box -- the same
+        // real geometry floorArea above is computed from, not a separate
+        // guess. A rotated/irregular footprint's bounding box is larger
+        // than its true width/depth, so this is labeled "(bounding box)"
+        // rather than implied to be exact building dimensions.
         let lengthM = null, breadthM = null
         if (footprintPts && footprintPts.length >= 3) {
           const xs = footprintPts.map((p) => p[0]), zs = footprintPts.map((p) => p[1])
@@ -1136,6 +1277,11 @@ function severityStyle(severity) {
   return { text: 'text-sky-400', bg: 'bg-sky-500/10', border: 'border-sky-500/25', dot: 'bg-sky-400' }
 }
 
+// Real conflicts, sourced from GET /api/review/conflicts (topology
+// validation: floor overlaps, unit overlaps, invalid elevation ranges,
+// underground-utility intersections) -- never a placeholder "looks fine"
+// state when the check genuinely couldn't be run (restricted=true for an
+// anonymous viewer who isn't signed in to see conflict data).
 function ConflictList({ conflicts, restricted, emptyLabel }) {
   if (restricted) {
     return (
@@ -1171,6 +1317,11 @@ function ConflictList({ conflicts, restricted, emptyLabel }) {
   )
 }
 
+// Side-by-side comparison of a building's pre-AI manually entered
+// floors/height (manual_num_floors/manual_height_m, snapshotted the
+// moment the model overwrote them) against the AI model's own current
+// output (num_floors/height_m) -- real stored values on both sides, no
+// invented "estimated" numbers.
 function ManualVsAI({ building }) {
   if (!building) return null
   const hasManualSnapshot = building.manual_num_floors != null || building.manual_height_m != null
@@ -1210,6 +1361,9 @@ function ManualVsAI({ building }) {
   )
 }
 
+// Compact one-line version of the same manual-vs-AI comparison, used in
+// the Floor panel to surface the parent building's status without
+// duplicating the full breakdown shown on the Building panel.
 function BuildingSourceNote({ building }) {
   const hasManualSnapshot = building.manual_num_floors != null || building.manual_height_m != null
   if (!hasManualSnapshot) {

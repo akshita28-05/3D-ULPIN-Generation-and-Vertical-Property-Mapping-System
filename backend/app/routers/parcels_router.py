@@ -1,6 +1,6 @@
 import json
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from typing import List
 
 from .. import models, schemas, auth, lifecycle
@@ -119,8 +119,36 @@ def list_location_codes(db: Session = Depends(get_db), field_type: str = None):
 
 @router.get("/parcels", response_model=List[schemas.ParcelOut])
 def list_parcels(db: Session = Depends(get_db), limit: int = 100, offset: int = 0):
+    # Capped + paginated so this endpoint stays fast as the dataset grows --
+    # an unbounded `.all()` here would get slower and heavier for every
+    # concurrent request once there are thousands of parcels. Raised from
+    # 500 -> 5000: a single bulk-import job alone can legitimately produce
+    # hundreds of parcels (476 in one reported case), and every "list every
+    # parcel" UI (parcel selector, admin All ULPIN Records, GIS Map,
+    # Underground & Air-Rights, citizen Home) needs to be able to actually
+    # request all of them, not just the newest 500.
+    #
+    # `selectinload` (not the `joinedload` GET /parcels/{id} below uses) --
+    # for a *list* of parcels, joinedload's single SQL JOIN multiplies each
+    # parcel's row once per floor/unit it has (3 buildings x 6 floors x 4
+    # units => ~72 duplicate rows to de-duplicate per parcel), getting
+    # slower the bigger a property is. selectinload instead loads each
+    # relationship level in ONE extra `WHERE parent_id IN (...)` query for
+    # the whole page, however many rows it has. Without ANY eager-loading
+    # here (as before), serializing ParcelOut's nested buildings/floors/
+    # units meant SQLAlchemy lazy-loaded each relationship as it was
+    # touched -- one query per parcel for its buildings, then one query per
+    # building for its floors, then one per floor for its units: thousands
+    # of round trips for a full list, which is what made every page that
+    # lists parcels (the citizen Unit Explorer's parcel selector included)
+    # feel like it hung on load.
     limit = min(limit, 5000)
-    return db.query(models.Parcel).order_by(models.Parcel.created_at.desc()).offset(offset).limit(limit).all()
+    return (
+        db.query(models.Parcel)
+        .options(selectinload(models.Parcel.buildings).selectinload(models.Building.floors).selectinload(models.Floor.units))
+        .order_by(models.Parcel.created_at.desc())
+        .offset(offset).limit(limit).all()
+    )
 
 
 @router.get("/parcels/{parcel_id}", response_model=schemas.ParcelOut)
@@ -188,6 +216,7 @@ def search(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
             parent_label=u.floor.building.name if u.floor and u.floor.building else None,
         ))
 
+    # If query matches a full/partial 2D ULPIN, surface every unit under it (per spec example)
     if q.isdigit() and len(q) >= 6:
         matching_parcels = db.query(models.Parcel).filter(models.Parcel.ulpin_2d.like(f"{q}%")).all()
         for p in matching_parcels:
@@ -203,6 +232,10 @@ def search(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
     return results[:30]
 
 
+# --- CRUD completion: update/delete for parcels, buildings, floors, units ---
+# (Creation already existed above; these fill the missing PATCH/DELETE half
+# of CRUD so surveyors/verifiers/admins can correct records post-creation,
+# not just create-and-abandon them.)
 
 _PARCEL_PATCHABLE = {
     "address", "centroid_lat", "centroid_lon", "footprint_geojson",
@@ -265,6 +298,10 @@ def update_building(
     for key, value in payload.items():
         if key in _BUILDING_PATCHABLE:
             setattr(building, key, value)
+    # A manual edit after the AI model has run supersedes the model's
+    # output for this field -- mark it back to "manual" so the honesty
+    # layer (footprint_source / floor_source) stays accurate rather than
+    # claiming an edited value is still the model's.
     if "footprint_geojson" in payload:
         building.footprint_source = "manual"
     if "num_floors" in payload or "height_m" in payload:

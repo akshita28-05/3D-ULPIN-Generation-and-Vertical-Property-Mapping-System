@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -49,6 +50,10 @@ def create_underground_asset(
             raise ValueError
     except Exception:
         raise HTTPException(status_code=400, detail="geometry_geojson must be a JSON array of at least 3 [x,y] points")
+    # Depths are entered as positive metres BELOW the ground surface (0 =
+    # surface, larger = deeper) -- this is the natural way a surveyor thinks
+    # about a buried asset, and the 3D viewer takes care of converting it to
+    # a below-ground position so it never renders up near/above the building.
     if payload.depth_min_m < 0 or payload.depth_max_m < 0:
         raise HTTPException(status_code=400, detail="Depths must be positive metres below ground (e.g. min=1.5, max=3)")
     if payload.depth_min_m >= payload.depth_max_m:
@@ -177,8 +182,16 @@ def delete_air_right_corridor(
 
 
 @router.get("/underground-assets")
-def list_underground_assets(db: Session = Depends(get_db)):
-    assets = db.query(models.UndergroundAsset).all()
+def list_underground_assets(db: Session = Depends(get_db), parcel_id: Optional[str] = None):
+    """parcel_id is optional so the existing global admin views (Underground & Air-Rights page, bulk
+    exports) keep working unchanged -- but callers that only care about one parcel, like the citizen
+    3D viewer, should always pass it: without it, this used to be queried in full every time a citizen
+    opened any parcel, then filtered down to that one parcel's rows in the browser, re-fetching and
+    re-discarding every OTHER parcel's underground assets on every single page view."""
+    q = db.query(models.UndergroundAsset)
+    if parcel_id:
+        q = q.filter(models.UndergroundAsset.parcel_id == parcel_id)
+    assets = q.all()
     return [{
         "id": a.id, "parcel_id": a.parcel_id, "asset_type": a.asset_type,
         "depth_min_m": a.depth_min_m, "depth_max_m": a.depth_max_m,
@@ -189,8 +202,12 @@ def list_underground_assets(db: Session = Depends(get_db)):
 
 
 @router.get("/air-rights")
-def list_air_rights(db: Session = Depends(get_db)):
-    corridors = db.query(models.AirRightCorridor).all()
+def list_air_rights(db: Session = Depends(get_db), parcel_id: Optional[str] = None):
+    """See list_underground_assets above -- same optional parcel_id, same reason."""
+    q = db.query(models.AirRightCorridor)
+    if parcel_id:
+        q = q.filter(models.AirRightCorridor.parcel_id == parcel_id)
+    corridors = q.all()
     return [{
         "id": c.id, "parcel_id": c.parcel_id, "corridor_type": c.corridor_type,
         "height_min_m": c.height_min_m, "height_max_m": c.height_max_m,
@@ -289,11 +306,11 @@ def list_gnss_control_points(dataset_id: str = None, db: Session = Depends(get_d
 
 
 class RegisterViaGCPRequest(BaseModel):
-    correspondences: list
+    correspondences: list  # [{"local_x":.., "local_y":.., "local_z":.., "gnss_control_point_id": "..."}], >=3 items
 
 
 class RegisterICPRequest(BaseModel):
-    target_dataset_id: str
+    target_dataset_id: str  # a reference point-cloud Dataset already registered (has storage_path + ideally its own transform)
     max_points: int = 50000
 
 
