@@ -178,24 +178,31 @@ function computeFrame(parcel, focusedBuildingId, aspect = 1) {
     })
   }
 
+  let buildingOnlyExtent = extent
   const framePts = buildingPts.length >= 3 ? buildingPts : safeParse(parcel.footprint_geojson)
   if (framePts && framePts.length >= 3) {
     let minX = Math.min(...framePts.map((p) => p[0])), maxX = Math.max(...framePts.map((p) => p[0]))
     let minY = Math.min(...framePts.map((p) => p[1])), maxY = Math.max(...framePts.map((p) => p[1]))
+    buildingOnlyExtent = Math.max(maxX - minX, maxY - minY)
+    centerX = (minX + maxX) / 2
+    centerZ = (minY + maxY) / 2
     // Underground structures / corridors that cross or run right beside the parcel (real open-data
     // features from GET /api/infra/parcel/{id}) belong in the default frame too -- otherwise a metro
     // line 30 m from the building is off-screen and the layers look empty. Distant ones (beyond 60 m)
-    // stay reachable by orbiting/zooming but don't shrink the building.
+    // stay reachable by orbiting/zooming but don't shrink the building. `buildingOnlyExtent` above is
+    // kept from BEFORE this union specifically so a portrait/mobile canvas can cap how much a
+    // far-reaching corridor (e.g. a cable running the length of the plot) is allowed to shrink the
+    // building on first view -- see the mobile-only distance cap below.
     if (!focusedBuilding && parcel.infra?.available) {
       const near = (parcel.infra.features || []).filter((f) => f.on_parcel || f.distance_m <= 60)
       const b = infraBounds(near)
       if (b) {
         minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX)
         minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY)
+        centerX = (minX + maxX) / 2
+        centerZ = (minY + maxY) / 2
       }
     }
-    centerX = (minX + maxX) / 2
-    centerZ = (minY + maxY) / 2
     extent = Math.max(maxX - minX, maxY - minY)
   }
 
@@ -230,17 +237,32 @@ function computeFrame(parcel, focusedBuildingId, aspect = 1) {
   // so the default view sits close to the building rather than a wide
   // establishing shot.
   let distance = Math.max(span * 1.0 + 3, 9)
-  // The camera's `fov` (set where it's constructed, below) is the VERTICAL field of view; the
-  // HORIZONTAL one it actually shows depends on the canvas's aspect ratio (hFov shrinks as aspect
-  // drops below 1). `distance` above was tuned to fit `span` in the vertical FOV alone, which is
-  // the tighter (binding) constraint on a landscape/desktop canvas (aspect >= 1) -- so nothing
-  // changes there. On a portrait phone canvas (aspect well under 1, e.g. ~0.55), the horizontal FOV
-  // is the tighter one instead, and was never accounted for: the same "vertical fits" distance left
-  // the building's width badly overflowing the narrower horizontal FOV, so the default view opened
-  // pressed right up against one corner of the building -- exactly what showed up on mobile. Scaling
-  // by 1/aspect exactly compensates (see the horizontal/vertical FOV relation above) whenever the
-  // canvas is portrait, and is a no-op (aspect >= 1) on a landscape/desktop canvas.
-  if (aspect < 1) distance /= aspect
+  // Desktop/landscape (aspect >= 1): UNCHANGED from before -- distance is still based on the full
+  // span (building + any nearby infra unioned in above).
+  //
+  // Mobile/portrait (aspect < 1), two corrections, both scoped to this branch only:
+  //  1. Cap how far nearby infra alone is allowed to pull the camera back. A corridor/cable running
+  //     well beyond the building's own footprint (even though within the 60m "include it" radius
+  //     above) could otherwise make distance -- and so the building's on-screen size -- dominated by
+  //     the infra's extent rather than the building's, shrinking the building to a speck on a small
+  //     screen even though the exact same scene reads fine on a spacious desktop canvas. Clamping to
+  //     at most MOBILE_INFRA_DISTANCE_CAP x the building-only distance keeps the building the clear
+  //     visual focus on first view; the full infra extent is still fully reachable by pinch-zooming
+  //     or orbiting out, exactly as it always was.
+  //  2. THEN apply the same horizontal/vertical FOV correction as before: the camera's `fov` (set
+  //     where it's constructed, below) is the VERTICAL field of view, and the HORIZONTAL one it
+  //     actually shows shrinks with the canvas's aspect ratio. `distance` was tuned to fit span in
+  //     the vertical FOV alone, which is the tighter (binding) constraint on a landscape canvas --
+  //     on a portrait phone canvas the horizontal FOV is tighter instead, so without this the
+  //     building's width overflowed the narrower horizontal FOV (the close-up/cropped bug). Scaling
+  //     by 1/aspect compensates for that.
+  if (aspect < 1) {
+    const MOBILE_INFRA_DISTANCE_CAP = 1.8
+    const buildingOnlySpan = Math.max(buildingOnlyExtent, maxHeight)
+    const buildingOnlyDistance = Math.max(buildingOnlySpan * 1.0 + 3, 9)
+    distance = Math.min(distance, buildingOnlyDistance * MOBILE_INFRA_DISTANCE_CAP)
+    distance /= aspect
+  }
   const cameraHeightBasis = Math.max(maxHeight, 6) // keeps a real 3/4-view angle even for a single-storey building instead of a near-flat, side-on view
 
   return {

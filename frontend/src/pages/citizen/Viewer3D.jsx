@@ -15,6 +15,7 @@ import {
   RotateCcw, Loader2, FileDown, Flag, ChevronRight, ZoomIn, ZoomOut, Maximize2,
   ChevronUp, ChevronDown, ChevronLeft, Triangle, Box, Search, Eye, EyeOff,
   CheckCircle2, AlertTriangle, ShieldAlert, GripVertical, Trash2, Pencil, Save, Moon, Sun,
+  Info, Hash, Users, MapPin,
 } from 'lucide-react'
 
 const LAYER_DEFS = [
@@ -60,6 +61,7 @@ export default function Viewer3D() {
   const [selected, setSelected] = useState(null)
   const [selectedDetail, setSelectedDetail] = useState(null)
   const [showAddressSearch, setShowAddressSearch] = useState(false)
+  const [showPropertyInfo, setShowPropertyInfo] = useState(false)
   const [addressQuery, setAddressQuery] = useState('')
   const [addressResults, setAddressResults] = useState([])
   const [addressSearching, setAddressSearching] = useState(false)
@@ -510,6 +512,21 @@ export default function Viewer3D() {
             <button onClick={() => setMode('2d')} className={toolBtn(mode === '2d')}><MapIcon size={14} /> 2D</button>
           </div>
 
+          {/* Everything known about the currently selected parcel, gathered from the exact same
+              data already loaded for this view (parcel/buildings/floors/units, undergroundAssets,
+              airRights, conflicts) into one single screen, instead of having to open each building,
+              each underground layer item, etc. one at a time. */}
+          {parcel && (
+            <button
+              onClick={() => setShowPropertyInfo(true)}
+              className="card w-10 h-10 flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
+              aria-label="Full property details"
+              title="Full property details"
+            >
+              <Info size={16} />
+            </button>
+          )}
+
           {/* Real-time address search (OpenStreetMap Nominatim, not seeded data) */}
           <div className="relative">
             <button
@@ -643,17 +660,20 @@ export default function Viewer3D() {
           >
             {uiHidden ? <Eye size={17} /> : <EyeOff size={17} />}
           </button>
+          {/* Zoom in/out buttons: desktop only. On mobile, OrbitControls' own two-finger pinch
+              already zooms (enableZoom defaults on) -- these buttons only added clutter on a small
+              screen, on top of overlapping the Section View / layer-toggle strip below. */}
           <button
             onClick={() => sceneRef.current?.zoomIn()}
             aria-label="Zoom in"
-            className="card w-10 h-10 flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
+            className="card w-10 h-10 hidden sm:flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
           >
             <ZoomIn size={17} />
           </button>
           <button
             onClick={() => sceneRef.current?.zoomOut()}
             aria-label="Zoom out"
-            className="card w-10 h-10 flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
+            className="card w-10 h-10 hidden sm:flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
           >
             <ZoomOut size={17} />
           </button>
@@ -664,8 +684,12 @@ export default function Viewer3D() {
           (see ThreeScene.jsx) that discards geometry above the chosen
           height, for inspecting floors/basements and their overlaps,
           not a static image. */}
+      {/* Desktop only: on mobile this sat in the exact same bottom-left corner as the layer-toggle
+          strip above, overlapping it. The underlying section-clipping feature (ThreeScene's real
+          Three.js clipping plane) is untouched -- only this button's visibility on a small screen
+          changes; nothing about the 3D building or its rendering is affected. */}
       {mode === '3d' && parcel?.buildings?.length > 0 && (
-        <div className="absolute bottom-4 left-4 z-10 pointer-events-auto">
+        <div className="absolute bottom-4 left-4 z-10 pointer-events-auto hidden sm:block">
           <div className="card p-3 flex items-center gap-3">
             <button
               onClick={() => setSectionEnabled((v) => !v)}
@@ -702,6 +726,15 @@ export default function Viewer3D() {
             onApplyEdits={applyLocalEdits}
           />
         </div>
+      )}
+
+      {showPropertyInfo && parcel && (
+        <PropertyInfoModal
+          parcel={parcel}
+          onClose={() => setShowPropertyInfo(false)}
+          onSelectBuilding={(buildingId) => { setShowPropertyInfo(false); handleSelect({ type: 'building', id: buildingId }) }}
+          navigate={navigate}
+        />
       )}
     </div>
   )
@@ -1258,6 +1291,176 @@ function SelectionPanel({ detail, parcel, onClose, navigate, isAdmin, onSelect, 
           )}
         </>
       )}
+    </div>
+  )
+}
+
+// Everything already loaded for the selected parcel (buildings/floors/units, underground assets,
+// air-rights corridors, conflicts), gathered into one screen instead of split across the per-item
+// side panel -- a single place to answer "what's going on with this property", opened from the
+// Info button in the top toolbar. Reads only parcel.* that loadParcelDetail() already fetched;
+// makes no API calls of its own and invents nothing not already on the record.
+function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
+  const buildings = parcel.buildings || []
+  const underground = parcel.undergroundAssets || []
+  const airRights = parcel.airRights || []
+  const conflicts = parcel.conflicts || []
+  const conflictsRestricted = !!parcel.conflictsRestricted
+
+  // Same per-building estimate the building panel itself uses, so an unsurveyed building's floor
+  // count here always matches what that building's own detail view shows -- never a second, diverging
+  // guess for the same building.
+  const buildingStats = buildings.map((b) => ({ building: b, estimate: estimateBuildingDimensions(b) }))
+  const totalFloors = buildingStats.reduce((sum, { estimate }) => sum + (estimate.floors || 0), 0)
+  const totalUnits = buildings.reduce((sum, b) => sum + (b.floors?.reduce((s, f) => s + (f.units?.length || 0), 0) || 0), 0)
+  const anyUnsurveyed = buildingStats.some(({ estimate }) => estimate.estimated)
+
+  const stats = [
+    { icon: Building2, label: 'Buildings', value: buildings.length },
+    { icon: Layers, label: 'Total Floors', value: totalFloors, estimated: anyUnsurveyed },
+    { icon: Users, label: 'Total Units', value: totalUnits },
+    { icon: Cable, label: 'Underground Assets', value: underground.length },
+    { icon: Plane, label: 'Air-Right Corridors', value: airRights.length },
+    { icon: ShieldAlert, label: 'Conflicts', value: conflictsRestricted ? '—' : conflicts.length },
+  ]
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={onClose}>
+      <div className="card max-w-2xl w-full p-0 max-h-[88vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="sticky top-0 bg-ink-900/95 backdrop-blur-lg border-b border-white/10 p-5 flex items-start justify-between gap-3 z-10">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-brand-400 mb-1">
+              <Info size={15} />
+              <span className="text-[11px] font-semibold uppercase tracking-wide">Full Property Details</span>
+            </div>
+            <h2 className="font-display text-lg font-bold text-white break-all flex items-center gap-2">
+              <Hash size={15} className="text-slate-500 flex-shrink-0" /> {parcel.ulpin_2d}
+            </h2>
+            {parcel.address && (
+              <p className="text-xs text-slate-400 mt-1 flex items-center gap-1.5">
+                <MapPin size={12} className="flex-shrink-0" /> {parcel.address}
+              </p>
+            )}
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white flex-shrink-0" aria-label="Close"><X size={18} /></button>
+        </div>
+
+        <div className="p-5">
+          {/* Quick stats grid -- same visual language as the 3D City Map's stats strip, so the two
+              pages feel like one product rather than two differently-designed screens. */}
+          <div className="grid grid-cols-3 gap-2 mb-6">
+            {stats.map((s) => (
+              <div key={s.label} className="bg-white/5 border border-white/10 rounded-lg p-3">
+                <div className="flex items-center gap-1.5 text-slate-500 mb-1">
+                  <s.icon size={12} /> <span className="text-[10px] uppercase tracking-wide">{s.label}</span>
+                </div>
+                <div className="text-xl font-bold text-white">
+                  {s.value}{s.estimated && <span className="text-xs font-normal text-amber-400 ml-1">est.</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <Row label="Area" value={parcel.area_sqm != null ? `${parcel.area_sqm} sqm` : null} />
+
+          {/* Buildings -- click any one to jump straight to its own full detail panel (floor IDs,
+              identifiers, manual-vs-AI comparison, etc.), closing this modal. */}
+          <div className="mt-5">
+            <SectionLabel icon={Building2} text={`Buildings (${buildings.length})`} />
+            {buildings.length === 0 ? (
+              <div className="text-xs text-slate-500">No buildings registered on this parcel yet.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {buildingStats.map(({ building: b, estimate }) => {
+                  const unitCount = b.floors?.reduce((s, f) => s + (f.units?.length || 0), 0) || 0
+                  return (
+                    <button
+                      key={b.id}
+                      onClick={() => onSelectBuilding(b.id)}
+                      className="w-full text-left bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-3 py-2.5 flex items-center justify-between gap-3 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm text-white font-medium truncate">{b.name || b.building_code}</div>
+                        <div className="text-xs text-slate-500">
+                          {estimate.floors} floor{estimate.floors === 1 ? '' : 's'}{estimate.estimated ? ' (est.)' : ''} · {unitCount} unit{unitCount === 1 ? '' : 's'}
+                        </div>
+                      </div>
+                      <ChevronRight size={15} className="text-slate-500 flex-shrink-0" />
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Underground assets -- same records the Underground layer draws in 3D, listed here with
+              no extra lookups needed to see what's buried on or near this parcel. */}
+          <div className="mt-5">
+            <SectionLabel icon={Cable} text={`Underground Assets (${underground.length})`} />
+            {underground.length === 0 ? (
+              <div className="text-xs text-slate-500">No underground assets found near this parcel.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {underground.map((a) => (
+                  <div key={a.id} className="flex items-center justify-between gap-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs">
+                    <span className="text-slate-300 capitalize">{(a.asset_type || 'other').replace('_', ' ')}</span>
+                    <span className="text-slate-500 font-mono">
+                      {a.depth_min_m != null && a.depth_max_m != null ? `${a.depth_min_m}–${a.depth_max_m} m deep` : '—'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Air-right corridors -- same records the Air-rights layer draws in 3D. */}
+          <div className="mt-5">
+            <SectionLabel icon={Plane} text={`Air-Right Corridors (${airRights.length})`} />
+            {airRights.length === 0 ? (
+              <div className="text-xs text-slate-500">No air-right corridors found near this parcel.</div>
+            ) : (
+              <div className="space-y-1.5">
+                {airRights.map((c) => (
+                  <div key={c.id} className="flex items-center justify-between gap-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs">
+                    <span className="text-slate-300 capitalize">{(c.corridor_type || 'elevated transport').replace('_', ' ')}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500 font-mono">
+                        {c.height_min_m != null && c.height_max_m != null ? `${c.height_min_m}–${c.height_max_m} m` : '—'}
+                      </span>
+                      {c.conflict_status && c.conflict_status !== 'none' && (
+                        <span className={`badge ${c.conflict_status === 'confirmed' ? 'bg-red-500/10 text-red-400 border border-red-500/25' : 'bg-amber-500/10 text-amber-400 border border-amber-500/25'}`}>
+                          {c.conflict_status}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Conflicts -- reuses the exact same ConflictList the per-building/unit panels use, here
+              showing every conflict on the parcel rather than one item's slice of them. */}
+          <div className="mt-5">
+            <SectionLabel icon={ShieldAlert} text="Conflicts" />
+            <ConflictList conflicts={conflicts} restricted={conflictsRestricted} emptyLabel="No conflicts detected for this parcel" />
+          </div>
+
+          <div className="flex flex-col gap-2 mt-6">
+            {buildings.length > 0 && (
+              <button
+                onClick={() => navigate(`/report/building/${buildings[0].id}`)}
+                className="btn-secondary w-full text-sm flex items-center justify-center gap-1.5"
+              >
+                <Flag size={13} /> Report an Issue with This Parcel
+              </button>
+            )}
+            <button onClick={() => navigate('/track')} className="btn-secondary w-full text-sm flex items-center justify-center gap-1.5">
+              <Search size={13} /> Track a Grievance
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
