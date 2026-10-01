@@ -5,6 +5,7 @@ import {
   Search, Boxes, ArrowRight, Layers, ShieldCheck, Cable, TrendingUp,
   Building2, MapPin, Users, CheckCircle2,
 } from 'lucide-react'
+import SurveyScanIllustration from '../../components/SurveyScanIllustration.jsx'
 
 function StatCard({ icon: Icon, value, label }) {
   return (
@@ -20,6 +21,7 @@ export default function Home() {
   const [stats, setStats] = useState(null)
 
   useEffect(() => {
+    // Public stat snapshot — falls back gracefully if not authenticated
     api.get('/parcels', { params: { limit: 5000 } }).then((res) => {
       const parcels = res.data
       const buildings = parcels.reduce((a, p) => a + p.buildings.length, 0)
@@ -30,6 +32,7 @@ export default function Home() {
 
   return (
     <div>
+      {/* Hero */}
       <section className="relative overflow-hidden">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-16 sm:pt-24 pb-16 sm:pb-20 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-brand-500/20 bg-brand-500/5 text-brand-400 text-xs font-medium mb-6">
@@ -52,7 +55,16 @@ export default function Home() {
             </Link>
           </div>
 
-          <div className="mt-16 flex items-center justify-center gap-3 sm:gap-6 flex-wrap">
+          {/* Survey -> 3D ULPIN illustration */}
+          <div className="mt-14 max-w-xl mx-auto">
+            <SurveyScanIllustration />
+            <p className="mt-3 text-xs text-slate-500">
+              Each surveyed floor is automatically assigned its own 3D ULPIN.
+            </p>
+          </div>
+
+          {/* 2D -> 3D flow visual */}
+          <div className="mt-10 flex items-center justify-center gap-3 sm:gap-6 flex-wrap">
             {[
               { label: '2D Land Parcel', icon: MapPin },
               { label: '3D Property', icon: Boxes },
@@ -70,6 +82,7 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Stats */}
       <section className="max-w-5xl mx-auto px-4 sm:px-6 -mt-4 mb-20">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <StatCard icon={MapPin} value={stats?.parcels ?? '—'} label="Parcels Mapped" />
@@ -79,6 +92,7 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Problem */}
       <section className="max-w-5xl mx-auto px-4 sm:px-6 py-16 border-t border-white/5">
         <h2 className="font-display text-2xl sm:text-3xl font-bold text-white mb-4">The Problem</h2>
         <p className="text-slate-400 max-w-3xl leading-relaxed">
@@ -89,6 +103,7 @@ export default function Home() {
         </p>
       </section>
 
+      {/* How it works */}
       <section className="max-w-5xl mx-auto px-4 sm:px-6 py-16 border-t border-white/5">
         <h2 className="font-display text-2xl sm:text-3xl font-bold text-white mb-8">How 3D Cadastral Mapping Works</h2>
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -107,6 +122,7 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Underground infra highlight */}
       <section className="max-w-5xl mx-auto px-4 sm:px-6 py-16 border-t border-white/5">
         <div className="card p-6 sm:p-8 grid sm:grid-cols-2 gap-8 items-center">
           <div>
@@ -131,6 +147,7 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Benefits */}
       <section className="max-w-5xl mx-auto px-4 sm:px-6 py-16 border-t border-white/5">
         <h2 className="font-display text-2xl sm:text-3xl font-bold text-white mb-8">Benefits</h2>
         <div className="grid sm:grid-cols-3 gap-4">
@@ -148,6 +165,7 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Verification callout */}
       <section className="max-w-5xl mx-auto px-4 sm:px-6 py-16 border-t border-white/5 pb-24">
         <div className="card p-6 sm:p-8 text-center">
           <ShieldCheck className="mx-auto text-brand-400 mb-3" size={28} />
