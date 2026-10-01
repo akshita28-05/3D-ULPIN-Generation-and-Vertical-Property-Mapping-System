@@ -6,13 +6,13 @@ import StatusBadge from '../../components/StatusBadge.jsx'
 import ParcelInfoCard from '../../components/ParcelInfoCard.jsx'
 import BeforeAfterAIPanel from '../../components/BeforeAfterAIPanel.jsx'
 import InfraLegend from '../../components/InfraLegend.jsx'
-import { rangeText } from '../../components/building3d/infra3d.js'
+import { rangeText, infraStyle } from '../../components/building3d/infra3d.js'
 import { useAuth } from '../../context/AuthContext.jsx'
 import { polygonArea, safeParseGeojson } from '../../utils/geometry.js'
 import { estimateBuildingDimensions } from '../../utils/buildingEstimate.js'
 import {
   Layers, Building2, Cable, Plane, Map as MapIcon, Boxes, X,
-  RotateCcw, Loader2, FileDown, Flag, ChevronRight, ZoomIn, ZoomOut, Maximize2,
+  RotateCcw, Loader2, FileDown, Flag, ChevronRight, Maximize2,
   ChevronUp, ChevronDown, ChevronLeft, Triangle, Box, Search, Eye, EyeOff,
   CheckCircle2, AlertTriangle, ShieldAlert, GripVertical, Trash2, Pencil, Save, Moon, Sun,
   Info, Hash, Users, MapPin,
@@ -65,8 +65,6 @@ export default function Viewer3D() {
   const [addressQuery, setAddressQuery] = useState('')
   const [addressResults, setAddressResults] = useState([])
   const [addressSearching, setAddressSearching] = useState(false)
-  const [sectionEnabled, setSectionEnabled] = useState(false)
-  const [sectionHeight, setSectionHeight] = useState(0)
   // Toolbar/Layers/parcel-info are overlays on top of the 3D canvas, but
   // on a small building or a narrow window they can end up covering most
   // of what little the scene shows -- these let the person collapse them
@@ -167,9 +165,6 @@ export default function Viewer3D() {
       setSelectedDetail(null)
       setSelected(null)
       loadInfra(p.id)
-      const maxH = Math.max(30, ...p.buildings.map((b) => b.height_m || (b.num_floors ? b.num_floors * 3 : 0)))
-      setSectionHeight(maxH)
-      setSectionEnabled(false)
 
       // A directly-focused parcel (see loadParcelList's focusId handling
       // above) may not be among the newest-100 GET /parcels returned, so
@@ -396,10 +391,6 @@ export default function Viewer3D() {
     setAddressResults([])
   }
 
-  const sectionMaxHeight = parcel?.buildings?.length
-    ? Math.max(30, ...parcel.buildings.map((b) => b.height_m || (b.num_floors ? b.num_floors * 3 : 0)))
-    : 30
-
   return (
     <div className="relative h-[calc(100vh-4rem)] w-full overflow-hidden">
       {loading && (
@@ -466,8 +457,6 @@ export default function Viewer3D() {
           selectedDetail?.kind === 'unit' ? selectedDetail.data.buildingId :
           null
         }
-        sectionEnabled={sectionEnabled}
-        sectionHeight={sectionHeight}
         buildingStyle={buildingStyle}
         sceneTheme={sceneTheme}
       />
@@ -682,60 +671,8 @@ export default function Viewer3D() {
           >
             {uiHidden ? <Eye size={17} /> : <EyeOff size={17} />}
           </button>
-          {/* Zoom in/out buttons: desktop only. On mobile, OrbitControls' own two-finger pinch
-              already zooms (enableZoom defaults on) -- these buttons only added clutter on a small
-              screen, on top of overlapping the Section View / layer-toggle strip below. */}
-          <button
-            onClick={() => sceneRef.current?.zoomIn()}
-            aria-label="Zoom in"
-            className="card w-10 h-10 hidden sm:flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
-          >
-            <ZoomIn size={17} />
-          </button>
-          <button
-            onClick={() => sceneRef.current?.zoomOut()}
-            aria-label="Zoom out"
-            className="card w-10 h-10 hidden sm:flex items-center justify-center text-slate-300 hover:text-brand-400 transition-colors"
-          >
-            <ZoomOut size={17} />
-          </button>
         </div>
       </div>
-
-      {/* Vertical section/slice tool — a real Three.js clipping plane
-          (see ThreeScene.jsx) that discards geometry above the chosen
-          height, for inspecting floors/basements and their overlaps,
-          not a static image. */}
-      {/* Desktop only: on mobile this sat in the exact same bottom-left corner as the layer-toggle
-          strip above, overlapping it. The underlying section-clipping feature (ThreeScene's real
-          Three.js clipping plane) is untouched -- only this button's visibility on a small screen
-          changes; nothing about the 3D building or its rendering is affected. */}
-      {mode === '3d' && parcel?.buildings?.length > 0 && (
-        <div className="absolute bottom-4 left-4 z-10 pointer-events-auto hidden sm:block">
-          <div className="card p-3 flex items-center gap-3">
-            <button
-              onClick={() => setSectionEnabled((v) => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${sectionEnabled ? 'bg-brand-500 text-ink-950' : 'text-slate-400 hover:text-white'}`}
-            >
-              <Triangle size={13} className="rotate-90" /> Section View
-            </button>
-            {sectionEnabled && (
-              <div className="flex items-center gap-2">
-                <input
-                  type="range"
-                  min={0}
-                  max={sectionMaxHeight}
-                  step={0.1}
-                  value={sectionHeight}
-                  onChange={(e) => setSectionHeight(parseFloat(e.target.value))}
-                  className="w-40 accent-brand-500"
-                />
-                <span className="text-xs text-slate-400 font-mono w-14 text-right">{sectionHeight.toFixed(1)} m</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Selection panel */}
       {selectedDetail && (
@@ -1335,6 +1272,9 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
   // in place and that full inspector is one extra, clearly optional click
   // away via "Open Full Inspector" inside the expanded row.
   const [expandedBuildingId, setExpandedBuildingId] = useState(null)
+  // Which building's floor row is expanded to show its unit list + ULPINs -- scoped to
+  // {buildingId, floorId} so expanding a floor in one building never leaks into another.
+  const [expandedFloor, setExpandedFloor] = useState(null)
 
   // Same per-building estimate the building panel itself uses, so an unsurveyed building's floor
   // count here always matches what that building's own detail view shows -- never a second, diverging
@@ -1344,12 +1284,26 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
   const totalUnits = buildings.reduce((sum, b) => sum + (b.floors?.reduce((s, f) => s + (f.units?.length || 0), 0) || 0), 0)
   const anyUnsurveyed = buildingStats.some(({ estimate }) => estimate.estimated)
 
+  // Two different sources feed the underground / air-right numbers:
+  // - parcel.undergroundAssets / parcel.airRights: officially recorded rows tied to this
+  //   parcel_id (officer / GPR / AI pipeline).
+  // - parcel.infra.features: the open-data (OSM) nearby-structures scan, which is what the 3D
+  //   view's Underground/Air-rights layers actually draw in addition to the official rows (see
+  //   ThreeScene.jsx). Counting only the first set here used to make this modal say "0 air-right
+  //   corridors" even while the 3D scene clearly showed one found via the open-data scan -- so
+  //   both sources are counted and listed below, clearly labelled, instead of only the official one.
+  const infra = parcel.infra?.available ? parcel.infra : null
+  const nearbyUnderground = infra ? infra.features.filter((f) => f.kind === 'underground') : []
+  const nearbyAir = infra ? infra.features.filter((f) => f.kind === 'air') : []
+  const undergroundTotal = underground.length + nearbyUnderground.length
+  const airRightsTotal = airRights.length + nearbyAir.length
+
   const stats = [
     { icon: Building2, label: 'Buildings', value: buildings.length },
     { icon: Layers, label: 'Total Floors', value: totalFloors, estimated: anyUnsurveyed },
     { icon: Users, label: 'Total Units', value: totalUnits },
-    { icon: Cable, label: 'Underground Assets', value: underground.length },
-    { icon: Plane, label: 'Air-Right Corridors', value: airRights.length },
+    { icon: Cable, label: 'Underground Assets', value: undergroundTotal },
+    { icon: Plane, label: 'Air-Right Corridors', value: airRightsTotal },
     { icon: ShieldAlert, label: 'Conflicts', value: conflictsRestricted ? '—' : conflicts.length },
   ]
 
@@ -1423,23 +1377,56 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
 
                       {isOpen && (
                         <div className="px-3 pb-3 pt-1 border-t border-white/10 space-y-2">
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                          {/* One column, top to bottom -- a 2-column layout here used to put
+                              "Height"/"Data source" over on the right edge of the card where they
+                              read as a second, disconnected block of information instead of part
+                              of the same list as "Type"/"Floors" on the left. */}
+                          <div className="space-y-1 text-xs">
+                            <Row label="Building ID" value={b.building_code} mono />
                             <Row label="Type" value={b.building_type || 'Not recorded'} />
                             <Row label="Height" value={b.height_m != null ? `${b.height_m} m` : estimate.estimated ? `~${estimate.floors * 3} m (est.)` : null} />
                             <Row label="Floors" value={b.num_floors != null ? b.num_floors : `${estimate.floors} (est.)`} />
+                            {b.num_basement_levels > 0 && <Row label="Basement Levels" value={b.num_basement_levels} />}
                             <Row label="Data source" value={b.floor_source === 'ml_model' ? 'AI model' : b.floor_source === 'manual' ? 'Surveyed' : 'Unsurveyed estimate'} />
                           </div>
 
                           {b.floors?.length > 0 && (
                             <div className="pt-1">
                               <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Floors &amp; Units</div>
-                              <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
-                                {b.floors.map((f) => (
-                                  <div key={f.id} className="flex items-center justify-between text-xs bg-white/5 rounded px-2 py-1">
-                                    <span className="text-slate-300">{f.floor_number < 0 ? `Basement ${-f.floor_number}` : f.floor_number === 0 ? 'Ground' : `Floor ${f.floor_number}`}</span>
-                                    <span className="text-slate-500">{f.units?.length || 0} unit{(f.units?.length || 0) === 1 ? '' : 's'}</span>
-                                  </div>
-                                ))}
+                              <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+                                {b.floors.map((f) => {
+                                  const floorLabel = f.floor_number < 0 ? `Basement ${-f.floor_number}` : f.floor_number === 0 ? 'Ground' : `Floor ${f.floor_number}`
+                                  const floorHeight = f.z_min != null && f.z_max != null ? `${(f.z_max - f.z_min).toFixed(1)} m` : null
+                                  const floorOpen = expandedFloor?.buildingId === b.id && expandedFloor?.floorId === f.id
+                                  return (
+                                    <div key={f.id} className="bg-white/5 rounded">
+                                      <button
+                                        onClick={() => setExpandedFloor(floorOpen ? null : { buildingId: b.id, floorId: f.id })}
+                                        className="w-full flex items-center justify-between text-xs px-2 py-1 hover:bg-white/5 rounded"
+                                      >
+                                        <span className="text-slate-300 flex items-center gap-1.5">
+                                          {floorLabel}
+                                          <span className="text-slate-600 font-mono text-[10px]">{f.floor_code}</span>
+                                        </span>
+                                        <span className="text-slate-500 flex items-center gap-2">
+                                          {floorHeight && <span className="font-mono text-[10px]">{floorHeight}</span>}
+                                          {f.units?.length || 0} unit{(f.units?.length || 0) === 1 ? '' : 's'}
+                                          {f.units?.length > 0 && <ChevronRight size={11} className={`transition-transform ${floorOpen ? 'rotate-90' : ''}`} />}
+                                        </span>
+                                      </button>
+                                      {floorOpen && f.units?.length > 0 && (
+                                        <div className="px-2 pb-1.5 space-y-1">
+                                          {f.units.map((u) => (
+                                            <div key={u.id} className="flex items-center justify-between gap-2 text-[10px] bg-ink-950/40 rounded px-2 py-1">
+                                              <span className="text-slate-400 font-mono break-all">{u.ulpin_3d}</span>
+                                              <span className="text-slate-500 flex-shrink-0">{u.area_sqm != null ? `${u.area_sqm} sqm` : '—'}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
                               </div>
                             </div>
                           )}
@@ -1459,31 +1446,55 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
             )}
           </div>
 
-          {/* Underground assets -- same records the Underground layer draws in 3D, listed here with
-              no extra lookups needed to see what's buried on or near this parcel. */}
+          {/* Underground assets -- official records (officer / GPR / AI) PLUS anything the
+              open-data nearby-structures scan found, since that scan is what the Underground
+              layer in the 3D view also draws (see ThreeScene.jsx) -- listing only the official
+              rows here used to under-count against what the 3D scene actually showed. */}
           <div className="mt-5">
-            <SectionLabel icon={Cable} text={`Underground Assets (${underground.length})`} />
-            {underground.length === 0 ? (
-              <div className="text-xs text-slate-500">No underground assets found near this parcel.</div>
+            <SectionLabel icon={Cable} text={`Underground Assets (${undergroundTotal})`} />
+            {undergroundTotal === 0 ? (
+              <div className="text-xs text-slate-500">No underground assets found on or near this parcel.</div>
             ) : (
               <div className="space-y-1.5">
                 {underground.map((a) => (
                   <div key={a.id} className="flex items-center justify-between gap-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs">
                     <span className="text-slate-300 capitalize">{(a.asset_type || 'other').replace('_', ' ')}</span>
-                    <span className="text-slate-500 font-mono">
-                      {a.depth_min_m != null && a.depth_max_m != null ? `${a.depth_min_m}–${a.depth_max_m} m deep` : '—'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500 font-mono">
+                        {a.depth_min_m != null && a.depth_max_m != null ? `${a.depth_min_m}–${a.depth_max_m} m deep` : '—'}
+                      </span>
+                      <span className="badge bg-white/5 text-slate-400 border border-white/10">on record</span>
+                    </div>
+                  </div>
+                ))}
+                {nearbyUnderground.map((f) => (
+                  <div key={f.id} className="flex items-center justify-between gap-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs">
+                    <span className="text-slate-300 capitalize">{infraStyle(f).short}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500 font-mono">{rangeText(f) || '—'}</span>
+                      <span className="badge bg-white/5 text-slate-400 border border-white/10">
+                        {f.on_parcel ? 'open data · on parcel' : `open data · ${Math.round(f.distance_m)} m away`}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
+            {nearbyUnderground.length > 0 && (
+              <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
+                "Open data" rows come from an OpenStreetMap nearby-structures scan, not a survey or officer entry.
+              </p>
+            )}
           </div>
 
-          {/* Air-right corridors -- same records the Air-rights layer draws in 3D. */}
+          {/* Air-right corridors -- same combined official + open-data logic as Underground Assets
+              above, so a corridor the 3D view draws from the nearby-structures scan (e.g. a
+              power line or elevated road within the scan radius) is never missing here just
+              because no officer has formally recorded it against this parcel yet. */}
           <div className="mt-5">
-            <SectionLabel icon={Plane} text={`Air-Right Corridors (${airRights.length})`} />
-            {airRights.length === 0 ? (
-              <div className="text-xs text-slate-500">No air-right corridors found near this parcel.</div>
+            <SectionLabel icon={Plane} text={`Air-Right Corridors (${airRightsTotal})`} />
+            {airRightsTotal === 0 ? (
+              <div className="text-xs text-slate-500">No air-right corridors found on or near this parcel.</div>
             ) : (
               <div className="space-y-1.5">
                 {airRights.map((c) => (
@@ -1498,10 +1509,32 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
                           {c.conflict_status}
                         </span>
                       )}
+                      <span className="badge bg-white/5 text-slate-400 border border-white/10">on record</span>
+                    </div>
+                  </div>
+                ))}
+                {nearbyAir.map((f) => (
+                  <div key={f.id} className="flex items-center justify-between gap-3 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs">
+                    <span className="text-slate-300 capitalize">{infraStyle(f).short}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500 font-mono">{rangeText(f) || '—'}</span>
+                      {f.conflict_status && f.conflict_status !== 'none' && (
+                        <span className={`badge ${f.conflict_status === 'confirmed' ? 'bg-red-500/10 text-red-400 border border-red-500/25' : 'bg-amber-500/10 text-amber-400 border border-amber-500/25'}`}>
+                          {f.conflict_status}
+                        </span>
+                      )}
+                      <span className="badge bg-white/5 text-slate-400 border border-white/10">
+                        {f.on_parcel ? 'open data · on parcel' : `open data · ${Math.round(f.distance_m)} m away`}
+                      </span>
                     </div>
                   </div>
                 ))}
               </div>
+            )}
+            {nearbyAir.length > 0 && (
+              <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
+                "Open data" rows come from an OpenStreetMap nearby-structures scan, not a survey or officer entry.
+              </p>
             )}
           </div>
 
