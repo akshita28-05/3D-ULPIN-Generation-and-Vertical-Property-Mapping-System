@@ -31,6 +31,13 @@ const toolBtn = (active) =>
     active ? 'bg-brand-500 text-ink-950' : 'text-slate-300 hover:text-white hover:bg-white/5'
   }`
 
+// Default landing parcel when nobody arrived via a ?focus= link (e.g. a bare /viewer visit). Picked
+// by ULPIN rather than database id, since ulpin_2d is what's actually stable/recognizable across a
+// reseed -- this is "56848459665529 (Karnataka Rural Infrastructure)". Only a *preferred* default:
+// if this ULPIN isn't present in the current list (different environment, not yet seeded), the
+// newest-parcel fallback below still applies, so the page never breaks over a missing record.
+const DEFAULT_ULPIN = '56848459665529'
+
 export default function Viewer3D() {
   const [allParcels, setAllParcels] = useState([])
   const [selectedParcelId, setSelectedParcelId] = useState(null)
@@ -107,8 +114,10 @@ export default function Viewer3D() {
           // parcel instead.
           setSelectedParcelId(focusId)
         } else if (data.length > 0) {
-          // Default to the most recently created parcel (data is newest-first).
-          setSelectedParcelId(data[0].id)
+          // Prefer the designated default parcel (DEFAULT_ULPIN) if it exists in this environment;
+          // otherwise fall back to the most recently created one (data is newest-first).
+          const byDefault = data.find((p) => p.ulpin_2d === DEFAULT_ULPIN)
+          setSelectedParcelId(byDefault ? byDefault.id : data[0].id)
         }
       } finally {
         setLoading(false)
