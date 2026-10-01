@@ -90,7 +90,7 @@ export default function Viewer3D() {
     async function loadParcelList() {
       setLoading(true)
       try {
-        const { data } = await api.get('/parcels', { params: { limit: 5000 } })
+        const { data } = await api.get('/parcels/summary', { params: { limit: 5000 } })
         setAllParcels(data)
         const focusParam = params.get('focus')
         // App-wide convention (see Search.jsx / GisMap.jsx): "type:id",
@@ -443,6 +443,19 @@ export default function Viewer3D() {
         </div>
       )}
 
+      {/* Always-on hint for a first-time visitor: nothing else on screen says
+          outright that floors/units are themselves clickable, not just the
+          building shell. Hidden once something is actually selected, so it
+          doesn't sit there stating the obvious once the person has already
+          found it. */}
+      {!loading && !selectedDetail && parcel?.buildings?.length > 0 && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
+          <div className="card px-3.5 py-2 text-[11px] text-slate-300 bg-ink-900/85 whitespace-nowrap">
+            Click on a floor or unit in the 3D view to see its property information
+          </div>
+        </div>
+      )}
+
       <ThreeScene
         ref={sceneRef} parcel={parcel} layers={layers} mode={mode} exploded={exploded} onSelect={handleSelect}
         selectedId={selectedDetail?.kind === 'unit' || selectedDetail?.kind === 'infra' ? selectedDetail.data.id : null}
@@ -473,6 +486,15 @@ export default function Viewer3D() {
                 <option key={p.id} value={p.id}>{p.ulpin_2d} — {p.address?.slice(0, 30) || 'No address'}</option>
               ))}
             </select>
+          )}
+          {parcel && (
+            <button
+              onClick={() => setShowPropertyInfo(true)}
+              title="View full property information for this parcel"
+              className="card !rounded-xl p-2.5 text-brand-400 hover:text-brand-300 bg-ink-900/90 border-none flex-shrink-0 animate-[pulse_3s_ease-in-out_infinite] hover:animate-none"
+            >
+              <Info size={16} />
+            </button>
           )}
           <div className="card p-1 flex items-center gap-0.5">
             <button onClick={() => sceneRef.current?.resetView()} title="Reset camera" className={toolBtn(false)}>
@@ -1306,6 +1328,13 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
   const airRights = parcel.airRights || []
   const conflicts = parcel.conflicts || []
   const conflictsRestricted = !!parcel.conflictsRestricted
+  // Which building's row is expanded inline, right here in the list --
+  // NOT which building the whole modal is about (that's `parcel` -- one
+  // modal per parcel, same as before). Clicking a building used to close
+  // this modal and jump to the big full-page inspector; now it opens
+  // in place and that full inspector is one extra, clearly optional click
+  // away via "Open Full Inspector" inside the expanded row.
+  const [expandedBuildingId, setExpandedBuildingId] = useState(null)
 
   // Same per-building estimate the building panel itself uses, so an unsurveyed building's floor
   // count here always matches what that building's own detail view shows -- never a second, diverging
@@ -1363,8 +1392,11 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
 
           <Row label="Area" value={parcel.area_sqm != null ? `${parcel.area_sqm} sqm` : null} />
 
-          {/* Buildings -- click any one to jump straight to its own full detail panel (floor IDs,
-              identifiers, manual-vs-AI comparison, etc.), closing this modal. */}
+          {/* Buildings -- click any one to expand its details right here in the
+              list (floor/unit breakdown, type, height, data source). "Open
+              Full Inspector" inside the expanded row is the only thing that
+              still closes this modal and jumps to the dedicated building
+              page, for someone who explicitly wants that. */}
           <div className="mt-5">
             <SectionLabel icon={Building2} text={`Buildings (${buildings.length})`} />
             {buildings.length === 0 ? (
@@ -1373,20 +1405,54 @@ function PropertyInfoModal({ parcel, onClose, onSelectBuilding, navigate }) {
               <div className="space-y-1.5">
                 {buildingStats.map(({ building: b, estimate }) => {
                   const unitCount = b.floors?.reduce((s, f) => s + (f.units?.length || 0), 0) || 0
+                  const isOpen = expandedBuildingId === b.id
                   return (
-                    <button
-                      key={b.id}
-                      onClick={() => onSelectBuilding(b.id)}
-                      className="w-full text-left bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-3 py-2.5 flex items-center justify-between gap-3 transition-colors"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-sm text-white font-medium truncate">{b.name || b.building_code}</div>
-                        <div className="text-xs text-slate-500">
-                          {estimate.floors} floor{estimate.floors === 1 ? '' : 's'}{estimate.estimated ? ' (est.)' : ''} · {unitCount} unit{unitCount === 1 ? '' : 's'}
+                    <div key={b.id} className="bg-white/5 border border-white/10 rounded-lg overflow-hidden">
+                      <button
+                        onClick={() => setExpandedBuildingId(isOpen ? null : b.id)}
+                        className="w-full text-left hover:bg-white/10 px-3 py-2.5 flex items-center justify-between gap-3 transition-colors"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-sm text-white font-medium truncate">{b.name || b.building_code}</div>
+                          <div className="text-xs text-slate-500">
+                            {estimate.floors} floor{estimate.floors === 1 ? '' : 's'}{estimate.estimated ? ' (est.)' : ''} · {unitCount} unit{unitCount === 1 ? '' : 's'}
+                          </div>
                         </div>
-                      </div>
-                      <ChevronRight size={15} className="text-slate-500 flex-shrink-0" />
-                    </button>
+                        <ChevronRight size={15} className={`text-slate-500 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                      </button>
+
+                      {isOpen && (
+                        <div className="px-3 pb-3 pt-1 border-t border-white/10 space-y-2">
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                            <Row label="Type" value={b.building_type || 'Not recorded'} />
+                            <Row label="Height" value={b.height_m != null ? `${b.height_m} m` : estimate.estimated ? `~${estimate.floors * 3} m (est.)` : null} />
+                            <Row label="Floors" value={b.num_floors != null ? b.num_floors : `${estimate.floors} (est.)`} />
+                            <Row label="Data source" value={b.floor_source === 'ml_model' ? 'AI model' : b.floor_source === 'manual' ? 'Surveyed' : 'Unsurveyed estimate'} />
+                          </div>
+
+                          {b.floors?.length > 0 && (
+                            <div className="pt-1">
+                              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Floors &amp; Units</div>
+                              <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                                {b.floors.map((f) => (
+                                  <div key={f.id} className="flex items-center justify-between text-xs bg-white/5 rounded px-2 py-1">
+                                    <span className="text-slate-300">{f.floor_number < 0 ? `Basement ${-f.floor_number}` : f.floor_number === 0 ? 'Ground' : `Floor ${f.floor_number}`}</span>
+                                    <span className="text-slate-500">{f.units?.length || 0} unit{(f.units?.length || 0) === 1 ? '' : 's'}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <button
+                            onClick={() => onSelectBuilding(b.id)}
+                            className="mt-1 text-[11px] font-medium text-brand-400 hover:text-brand-300 flex items-center gap-1"
+                          >
+                            Open Full Inspector <ChevronRight size={12} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )
                 })}
               </div>

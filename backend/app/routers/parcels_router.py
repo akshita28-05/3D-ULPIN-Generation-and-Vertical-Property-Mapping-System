@@ -117,6 +117,33 @@ def list_location_codes(db: Session = Depends(get_db), field_type: str = None):
     ]
 
 
+@router.get("/parcels/summary", response_model=List[schemas.ParcelSummaryOut])
+def list_parcels_summary(db: Session = Depends(get_db), limit: int = 5000, offset: int = 0):
+    """
+    Same rows as GET /parcels, but for a parcel-PICKER UI that only ever
+    reads id/ulpin_2d/address/centroid_lat/centroid_lon (the citizen Unit
+    Explorer's parcel selector, address-search "nearest parcel" matching --
+    see Viewer3D.jsx) and never touches buildings/floors/units. Deliberately
+    has NO selectinload at all: there's nothing nested to nest-load, so this
+    is a single plain query returning a small flat payload instead of
+    thousands of parcels' full building/floor/unit trees -- the thing that
+    was still making "Unit Explorer" feel slow to open even after
+    list_parcels() below got its N+1 query fixed with selectinload (the SQL
+    got fast; the JSON this endpoint used to ship for a page that never
+    reads most of it was still huge).
+
+    Placed BEFORE list_parcels() / get_parcel() deliberately: FastAPI
+    matches routes in registration order, and /parcels/{parcel_id} would
+    otherwise swallow "/parcels/summary" as parcel_id="summary".
+    """
+    limit = min(limit, 5000)
+    return (
+        db.query(models.Parcel)
+        .order_by(models.Parcel.created_at.desc())
+        .offset(offset).limit(limit).all()
+    )
+
+
 @router.get("/parcels", response_model=List[schemas.ParcelOut])
 def list_parcels(db: Session = Depends(get_db), limit: int = 100, offset: int = 0):
     # Capped + paginated so this endpoint stays fast as the dataset grows --

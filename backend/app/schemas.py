@@ -24,6 +24,9 @@ class SignupRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
+    # Public self-signup is always role=surveyor. Verifier/Admin accounts are
+    # promoted by an existing Admin via /auth/register, never self-assigned —
+    # this is a real security boundary, not just a UI restriction.
 
 
 class UserOut(BaseModel):
@@ -69,12 +72,15 @@ class BuildingOut(BaseModel):
     name: Optional[str]
     building_type: Optional[str]
     building_type_source: str = "manual"
-    num_floors: Optional[int] = None
+    num_floors: Optional[int] = None  # None means genuinely unsurveyed -- not 0, and not a placeholder guess
     height_m: Optional[float]
     num_basement_levels: int = 0
     footprint_geojson: Optional[str]
     ai_confidence: Optional[float]
     auto_generated: bool = False
+    # "manual" (surveyor-entered geometry) or "ml_model" (real YOLOv8-seg /
+    # point-cloud clustering output) -- reflects which path actually
+    # produced this building's data, set by the pipeline at run time.
     footprint_source: str = "manual"
     floor_source: str = "manual"
     osm_id: Optional[str] = None
@@ -108,8 +114,25 @@ class ParcelOut(BaseModel):
     buildings: List[BuildingOut] = []
 
 
+class ParcelSummaryOut(BaseModel):
+    """Lightweight sibling of ParcelOut -- just the fields a parcel-PICKER
+    UI needs (an id to select, a label to show, coordinates to match a
+    searched address against), with NO nested buildings/floors/units. For
+    thousands of parcels, serializing/transferring/parsing that full nested
+    tree just to populate a dropdown is the actual bottleneck once the N+1
+    query itself is fixed (see list_parcels_summary() in parcels_router.py)
+    -- this schema exists so that cost is never paid for a page that was
+    only ever going to read id/ulpin_2d/address/centroid_lat/centroid_lon."""
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    ulpin_2d: str
+    address: Optional[str]
+    centroid_lat: Optional[float]
+    centroid_lon: Optional[float]
+
+
 class SearchResult(BaseModel):
-    result_type: str
+    result_type: str  # parcel / building / floor / unit
     id: str
     label: str
     ulpin: Optional[str] = None
@@ -170,6 +193,10 @@ class StartProcessingRequest(BaseModel):
 
 
 class DetectFootprintsRequest(BaseModel):
+    # Optional pixel-space crop [x0, y0, x1, y1] in the uploaded image's
+    # ORIGINAL (uncropped) coordinates -- draw this around the one building
+    # the surveyor means when the uploaded image covers more than one
+    # building. Omit to run detection on the full image.
     crop_box: Optional[List[float]] = None
 
 
@@ -177,7 +204,7 @@ class FootprintCandidateOut(BaseModel):
     index: int
     confidence: float
     polygon_m: List[List[float]]
-    bbox_px: List[float]
+    bbox_px: List[float]  # [x0, y0, x1, y1] in the ORIGINAL image's pixel coords, for overlay
 
 
 class DetectFootprintsResponse(BaseModel):
@@ -193,6 +220,9 @@ class SelectFootprintRequest(BaseModel):
 
 
 class DetectFloorsRequest(BaseModel):
+    # Same crop_box convention as DetectFootprintsRequest -- restrict
+    # detection to one building's facade if the uploaded image shows more
+    # than one.
     crop_box: Optional[List[float]] = None
 
 
@@ -214,6 +244,10 @@ class DetectFloorsResponse(BaseModel):
 
 
 class SelectFloorsRequest(BaseModel):
+    # No fields needed -- there is only ever one pending estimate per
+    # building at a time (unlike footprint candidates, a facade band count
+    # doesn't have multiple "which one did you mean" options), so this
+    # just confirms "yes, use the cached estimate".
     pass
 
 
@@ -228,7 +262,7 @@ class ParcelCreate(BaseModel):
     land_use: Optional[str] = None
     centroid_lat: float
     centroid_lon: float
-    footprint_geojson: str
+    footprint_geojson: str  # real polygon the user drew/entered, as JSON string of [[x,y],...]
 
 
 class BuildingCreate(BaseModel):
@@ -238,7 +272,7 @@ class BuildingCreate(BaseModel):
     num_floors: int
     height_m: float
     num_basement_levels: int = 0
-    footprint_geojson: str
+    footprint_geojson: str  # real polygon the user drew/entered for this building
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -279,7 +313,7 @@ class NotificationOut(BaseModel):
 
 
 class UnitReviewAction(BaseModel):
-    action: str
+    action: str  # approve / reject / reprocess
     edited_footprint_geojson: Optional[str] = None
     edited_z_min: Optional[float] = None
     edited_z_max: Optional[float] = None
@@ -287,7 +321,7 @@ class UnitReviewAction(BaseModel):
 
 
 class BulkReviewAction(BaseModel):
-    action: str
+    action: str  # approve / reject
     note: Optional[str] = None
 
 
@@ -321,7 +355,7 @@ class PendingModelRunOut(BaseModel):
     has_basement_point_cloud: bool
     footprint_source: str
     floor_source: str
-    already_processed: bool
+    already_processed: bool  # True if floors/units already exist from a prior (manual-source) run
     created_at: datetime
 
 
@@ -337,6 +371,7 @@ class AnalyticsOut(BaseModel):
     processing_jobs_running: int
 
 
+# --- LADM Rights, Restrictions, Responsibilities registry ---
 class PartyCreate(BaseModel):
     party_type: str = "individual"
     reference_code: str
@@ -353,7 +388,7 @@ class PartyOut(BaseModel):
 
 
 class RRRCreate(BaseModel):
-    spatial_unit_type: str
+    spatial_unit_type: str  # parcel / unit / underground_asset / air_right_corridor
     spatial_unit_id: str
     party_id: Optional[str] = None
     right_type: Optional[str] = None
