@@ -1,4 +1,3 @@
-
 """
 Bounding-box building bulk-import from OpenStreetMap via the Overpass API.
 
@@ -20,47 +19,33 @@ did report, to catch tag disagreements like a height that doesn't match
 a levels count.
 """
 import logging
+import math
 import time
-import concurrent.futures
 
-import requests
+from . import overpass_client
 
 logger = logging.getLogger("landsphere.ingestion.osm")
 
-OVERPASS_ENDPOINTS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
-]
-# Per-endpoint request timeout. Endpoints are queried IN PARALLEL (see
-# fetch_buildings_in_bbox) and the first success wins, so the worst case
-# to find out "nothing worked" is one timeout window, not
-# len(OVERPASS_ENDPOINTS) of them stacked serially.
-REQUEST_TIMEOUT_S = 30
+# Endpoint list, timeouts, User-Agent, health tracking, retry/backoff and the on-disk tile cache all
+# live in overpass_client.py (the single place every Overpass call goes through). These names are
+# re-exported because other modules (infra/service.py, detection_router.py) import them from here.
+OVERPASS_ENDPOINTS = overpass_client.OVERPASS_ENDPOINTS
+REQUEST_HEADERS = overpass_client.REQUEST_HEADERS
+REQUEST_TIMEOUT_S = overpass_client.READ_TIMEOUT_S
+# Server-side budget written INTO the Overpass query (slightly under our HTTP read timeout so the
+# server gives up and says so, instead of us cutting the connection mid-answer).
+QL_TIMEOUT_S = max(10, REQUEST_TIMEOUT_S - 5)
 
-# A single Overpass request over a very large box (a whole city -- hundreds
-# of sq km, potentially tens of thousands of building ways) routinely times
-# out or gets rejected by the free public instances even when they're
-# otherwise healthy. Rather than blocking large areas outright, any area
-# above this size is automatically split into a grid of tiles this size or
-# smaller (see fetch_buildings_any_size) and queried tile-by-tile -- so any
-# area the person draws is importable, it just takes longer for a big one.
+# FIXED-GRID TILING. Every request is snapped to a global grid of GRID_DEG x GRID_DEG cells
+# (0.01 deg ~ 1.1 km, ~1.2 sq km). Because the cell boundaries never move, a cell downloaded once is
+# reused by every later view that touches it (panning back, "Map this view again", another officer),
+# and a retry after a partial failure only fetches the cells that are still missing. Small cells also
+# mean small, fast queries that the free servers rarely reject -- unlike one huge query per view.
+GRID_DEG = 0.01
+# Pause between successive LIVE tile requests (cache hits skip it) -- fair use of free public servers.
+TILE_REQUEST_DELAY_S = 1.0
+# Kept for older imports; the grid above supersedes the old "split if bigger than X sq km" rule.
 MAX_TILE_AREA_SQKM = 25.0
-# Pause between successive tile requests in a multi-tile fetch, purely to
-# stay well within the free services' fair-use expectations -- these are
-# public instances shared by everyone, not a dedicated backend.
-TILE_REQUEST_DELAY_S = 2.0
-
-# Overpass's public instances actively reject requests that don't
-# identify the calling application (their usage policy requires a
-# descriptive User-Agent) -- python-requests' default User-Agent
-# ("python-requests/x.x") reads as anonymous/bot-like traffic and gets
-# turned away, which is what an HTTP 406 from overpass-api.de actually
-# is here: not a network block, the server declining an unidentified
-# client. Every request below sends this instead.
-REQUEST_HEADERS = {
-    "User-Agent": "Vasudha3D-VPMS/1.0 (bulk building import; contact: admin@vasudha3d.example)",
-}
 
 # Real-world default per-storey height (m) used ONLY to estimate
 # num_floors from a height tag when OSM has no building:levels tag at
@@ -70,43 +55,36 @@ DEFAULT_FLOOR_HEIGHT_M = 3.2
 
 
 def _bbox_area_sqkm(south: float, west: float, north: float, east: float) -> float:
-    import math
     lat_km = (north - south) * 111.0
     lon_km = (east - west) * 111.0 * math.cos(math.radians((north + south) / 2.0))
     return abs(lat_km * lon_km)
 
 
-def _split_bbox_into_tiles(south: float, west: float, north: float, east: float, max_area_sqkm: float):
-    """Splits a bbox into an n x n grid of roughly equal sub-tiles, each
-    at or under max_area_sqkm, so a query of any size can be served as a
-    sequence of requests the free Overpass instances can actually handle.
-    Returns [(south, west, north, east), ...] -- a single-element list
-    (the original bbox unchanged) if it's already small enough."""
-    import math
-    total_area = _bbox_area_sqkm(south, west, north, east)
-    if total_area <= max_area_sqkm:
-        return [(south, west, north, east)]
-
-    n = max(1, math.ceil(math.sqrt(total_area / max_area_sqkm)))
-    lat_step = (north - south) / n
-    lon_step = (east - west) / n
+def _grid_tiles(south: float, west: float, north: float, east: float):
+    """Fixed-grid cells covering the bbox -> [(s, w, n, e), ...]. Coordinates are computed from
+    integer cell indexes (no float drift) so the same cell always yields the identical query text,
+    which is what makes the on-disk cache hit across different views."""
+    eps = 1e-9
+    i0, i1 = math.floor(south / GRID_DEG), math.floor((north - eps) / GRID_DEG)
+    j0, j1 = math.floor(west / GRID_DEG), math.floor((east - eps) / GRID_DEG)
     tiles = []
-    for i in range(n):
-        for j in range(n):
-            s = south + i * lat_step
-            n_ = south + (i + 1) * lat_step
-            w = west + j * lon_step
-            e = west + (j + 1) * lon_step
-            tiles.append((s, w, n_, e))
+    for i in range(i0, i1 + 1):
+        for j in range(j0, j1 + 1):
+            tiles.append((round(i * GRID_DEG, 6), round(j * GRID_DEG, 6),
+                          round((i + 1) * GRID_DEG, 6), round((j + 1) * GRID_DEG, 6)))
     return tiles
 
 
+def _split_bbox_into_tiles(south: float, west: float, north: float, east: float, max_area_sqkm: float = MAX_TILE_AREA_SQKM):
+    """Backward-compatible name; now returns the fixed-grid cells (max_area_sqkm is ignored)."""
+    return _grid_tiles(south, west, north, east)
+
+
 def _overpass_query_for_bbox(south: float, west: float, north: float, east: float) -> str:
-    """Standard Overpass QL query for building ways/relations within a
-    bounding box, with tags (out body) and node geometry (out geom) so we
-    get real polygon coordinates back, not just centroids."""
+    """Overpass QL for building ways/relations in a bbox, with tags (out body) and node geometry
+    (out geom) so we get real polygon coordinates back, not just centroids."""
     return f"""
-    [out:json][timeout:{REQUEST_TIMEOUT_S}];
+    [out:json][timeout:{QL_TIMEOUT_S}];
     (
       way["building"]({south},{west},{north},{east});
       relation["building"]({south},{west},{north},{east});
@@ -116,132 +94,116 @@ def _overpass_query_for_bbox(south: float, west: float, north: float, east: floa
 
 
 def _query_one_endpoint(endpoint: str, query: str):
-    """Single Overpass HTTP call. Returns (parsed_json, None) on success
-    or (None, human-readable error) on failure -- never raises, so the
-    parallel racer below can just collect results."""
-    try:
-        resp = requests.post(endpoint, data={"data": query}, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_S)
-        resp.raise_for_status()
-        return resp.json(), None
-    except requests.exceptions.Timeout:
-        return None, f"{endpoint} timed out after {REQUEST_TIMEOUT_S}s"
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else "?"
-        return None, f"{endpoint} returned HTTP {status}"
-    except requests.exceptions.ConnectionError:
-        return None, f"could not connect to {endpoint} (DNS/network/firewall)"
-    except Exception as e:
-        logger.exception(f"Overpass query failed via {endpoint}")
-        return None, f"{endpoint} failed: {e}"
+    """Single Overpass HTTP call -> (json, None) | (None, error). Kept for older callers."""
+    return overpass_client.query_one_endpoint(endpoint, query)
+
+
+def _race_overpass_query_ex(query: str, use_cache: bool = True):
+    """Cache -> health-ranked hedged live query with retry/backoff -> stale cache.
+    Returns (data, info) or (None, short_user_message); info = {"source", "age_days"}."""
+    return overpass_client.run_query(query, use_cache=use_cache)
 
 
 def _race_overpass_query(query: str):
-    """
-    Queries every endpoint in OVERPASS_ENDPOINTS IN PARALLEL for one
-    already-built Overpass QL query and returns as soon as the first
-    succeeds -- shared racing core for both building and road fetches, so
-    the endpoint list, timeout, and error-message wording live in exactly
-    one place instead of being duplicated per data type. Returns
-    (parsed_json, None) or (None, error_message).
-    """
-    data = None
-    errors = []
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(OVERPASS_ENDPOINTS))
-    try:
-        futures = {executor.submit(_query_one_endpoint, ep, query): ep for ep in OVERPASS_ENDPOINTS}
-        for future in concurrent.futures.as_completed(futures):
-            result, error = future.result()
-            if result is not None:
-                data = result
-                break
-            errors.append(error)
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-    if data is None:
-        combined = "; ".join(errors) if errors else "unknown error"
-        return None, (
-            f"All Overpass endpoints failed ({combined}). A 406/403 usually means a request got rejected "
-            f"outbound before reaching Overpass at all; 429 means rate-limited (these are shared free "
-            f"instances -- try again in a minute, or draw a smaller area to need fewer tile requests); a "
-            f"timeout on every endpoint at once, repeated across attempts on a network you know is open, "
-            f"points at a firewall/proxy blocking these hosts outbound rather than the servers themselves."
-        )
-    return data, None
+    """Older 2-tuple shape (data, error) used by infra/service.py."""
+    data, info = _race_overpass_query_ex(query)
+    return (data, None) if data is not None else (None, info)
 
 
-def _fetch_one_tile(south: float, west: float, north: float, east: float):
-    """
-    Fetches buildings for one tile, racing all OVERPASS_ENDPOINTS in
-    parallel via _race_overpass_query. Returns (buildings, None) or
-    (None, error_message).
-    """
-    query = _overpass_query_for_bbox(south, west, north, east)
-    data, error = _race_overpass_query(query)
-    if data is None:
-        return None, error
+def _bbox_intersects(geometry, south, west, north, east) -> bool:
+    lats = [p[0] for p in geometry]
+    lons = [p[1] for p in geometry]
+    return not (max(lats) < south or min(lats) > north or max(lons) < west or min(lons) > east)
 
-    buildings = []
+
+def _parse_buildings(data):
+    out = []
     for element in data.get("elements", []):
         geometry = element.get("geometry")
         if not geometry or len(geometry) < 3:
             continue  # not enough points to form a polygon -- skip rather than fabricate one
-        buildings.append({
+        out.append({
             "osm_id": str(element["id"]),
             "osm_type": element["type"],
             "tags": element.get("tags", {}),
             "geometry": [(pt["lat"], pt["lon"]) for pt in geometry],
         })
-    return buildings, None
+    return out
+
+
+def _parse_roads(data):
+    out = []
+    for element in data.get("elements", []):
+        geometry = element.get("geometry")
+        if not geometry or len(geometry) < 2:
+            continue  # a line needs at least 2 points -- skip anything degenerate rather than fabricate one
+        out.append({
+            "osm_id": str(element["id"]),
+            "tags": element.get("tags", {}),
+            "highway_type": element.get("tags", {}).get("highway"),
+            "geometry": [(pt["lat"], pt["lon"]) for pt in geometry],
+        })
+    return out
+
+
+def _fetch_tiles(south, west, north, east, build_query, parse, label):
+    """Shared tile loop for buildings and roads.
+    Returns (items_by_id | None, warning | None). None only if EVERY tile failed."""
+    tiles = _grid_tiles(south, west, north, east)
+    items = {}
+    failed = stale = 0
+    last_error = None
+    max_age = 0.0
+    for idx, (s, w, n, e) in enumerate(tiles):
+        data, info = _race_overpass_query_ex(build_query(s, w, n, e))
+        if data is None:
+            failed += 1
+            last_error = info
+            logger.warning("%s tile %d/%d (%s,%s,%s,%s) failed: %s", label, idx + 1, len(tiles), s, w, n, e, info)
+        else:
+            if info["source"] == "stale-cache":
+                stale += 1
+                max_age = max(max_age, info["age_days"] or 0.0)
+            for it in parse(data):
+                if _bbox_intersects(it["geometry"], south, west, north, east):
+                    items[it["osm_id"]] = it            # de-dupe items straddling tile edges
+        # only pause after a request that really hit the network
+        if data is not None and info["source"] == "live" and idx < len(tiles) - 1:
+            time.sleep(TILE_REQUEST_DELAY_S)
+
+    if failed == len(tiles):
+        return None, last_error or overpass_client.FRIENDLY_FAIL
+    notes = []
+    if failed:
+        notes.append(f"{failed} of {len(tiles)} map areas could not be downloaded right now and were skipped - "
+                     f"press the button again to fetch just the missing ones (the rest are saved).")
+    if stale:
+        notes.append(f"{stale} area(s) came from saved data up to {max_age:.0f} day(s) old because the live servers were unreachable.")
+    return items, (" ".join(notes) or None)
+
+
+def _fetch_one_tile(south: float, west: float, north: float, east: float):
+    """One grid tile of buildings -> (buildings, None) | (None, error). Kept for older callers."""
+    data, info = _race_overpass_query_ex(_overpass_query_for_bbox(south, west, north, east))
+    if data is None:
+        return None, info
+    return _parse_buildings(data), None
 
 
 def fetch_buildings_in_bbox(south: float, west: float, north: float, east: float):
     """
-    Fetches every OSM building in a bbox of ANY size: queried directly if
-    it's already at or under MAX_TILE_AREA_SQKM, otherwise automatically
-    split into a grid of tiles that size and fetched tile-by-tile (each
-    tile racing all OVERPASS_ENDPOINTS in parallel), with results merged
-    and de-duplicated by osm_id (a building can be returned by more than
-    one tile if it straddles a tile boundary).
+    Every OSM building in a bbox of ANY size, fetched tile-by-tile over the fixed grid (cache-first,
+    health-ranked failover, retries, stale-if-error -- see overpass_client.py).
 
-    Returns (buildings, warning_or_None) on success -- warning is set
-    (but buildings is still a real, non-empty result) if SOME tiles
-    failed while others succeeded, so the caller can show "N buildings
-    found, but M areas within your selection could not be reached" rather
-    than silently returning an incomplete result as if it were complete.
-
-    Returns (None, error_message) only if EVERY tile failed -- nothing
-    usable came back at all.
+    Returns (buildings, warning_or_None) on success; warning is set (buildings still real and
+    non-empty) if SOME tiles failed or came from older saved data, so callers can say so instead of
+    pretending the result is complete.
+    Returns (None, error_message) only if EVERY tile failed. The message is short and user-safe.
     """
-    tiles = _split_bbox_into_tiles(south, west, north, east, MAX_TILE_AREA_SQKM)
-
-    buildings_by_id = {}
-    failed_tiles = 0
-    last_error = None
-    for idx, (s, w, n, e) in enumerate(tiles):
-        tile_buildings, error = _fetch_one_tile(s, w, n, e)
-        if tile_buildings is None:
-            failed_tiles += 1
-            last_error = error
-            logger.warning(f"Tile {idx + 1}/{len(tiles)} ({s},{w},{n},{e}) failed: {error}")
-        else:
-            for b in tile_buildings:
-                buildings_by_id[b["osm_id"]] = b  # de-dupe buildings that straddle tile edges
-        if idx < len(tiles) - 1:
-            time.sleep(TILE_REQUEST_DELAY_S)
-
-    buildings = list(buildings_by_id.values())
-
-    if failed_tiles == len(tiles):
-        return None, last_error or "All area tiles failed."
-
-    warning = None
-    if failed_tiles > 0:
-        warning = (
-            f"{failed_tiles} of {len(tiles)} area tiles could not be reached and were skipped -- "
-            f"results below are incomplete for your selected area. Last error: {last_error}"
-        )
-    return buildings, warning
+    items, warning = _fetch_tiles(south, west, north, east, _overpass_query_for_bbox, _parse_buildings, "Building")
+    if items is None:
+        return None, warning
+    return list(items.values()), warning
 
 
 def parse_building_attributes(tags: dict):
@@ -319,13 +281,10 @@ def latlon_polygon_to_local_meters(latlon_points, origin_lat, origin_lon):
 # ---------------------------------------------------------------------------
 
 def _overpass_query_for_roads_bbox(south: float, west: float, north: float, east: float) -> str:
-    """Overpass QL for every road/street way within a bbox. Roads are
-    open polylines (not closed polygons like buildings), so this only
-    needs 'way', not 'relation' -- a small number of roads are mapped as
-    route relations, but the vast majority of drivable/walkable geometry
-    is plain ways, which is enough for a visual road-network overlay."""
+    """Overpass QL for every road/street way within a bbox. Roads are open polylines, so only 'way'
+    is needed (a few roads are route relations, but plain ways are enough for the overlay)."""
     return f"""
-    [out:json][timeout:{REQUEST_TIMEOUT_S}];
+    [out:json][timeout:{QL_TIMEOUT_S}];
     (
       way["highway"]({south},{west},{north},{east});
     );
@@ -334,62 +293,19 @@ def _overpass_query_for_roads_bbox(south: float, west: float, north: float, east
 
 
 def _fetch_roads_one_tile(south: float, west: float, north: float, east: float):
-    """Fetches road centerlines for one tile. Returns (roads, None) or
-    (None, error_message) -- same shape as _fetch_one_tile's buildings."""
-    query = _overpass_query_for_roads_bbox(south, west, north, east)
-    data, error = _race_overpass_query(query)
+    data, info = _race_overpass_query_ex(_overpass_query_for_roads_bbox(south, west, north, east))
     if data is None:
-        return None, error
-
-    roads = []
-    for element in data.get("elements", []):
-        geometry = element.get("geometry")
-        if not geometry or len(geometry) < 2:
-            continue  # a line needs at least 2 points -- skip anything degenerate rather than fabricate one
-        roads.append({
-            "osm_id": str(element["id"]),
-            "tags": element.get("tags", {}),
-            "highway_type": element.get("tags", {}).get("highway"),
-            "geometry": [(pt["lat"], pt["lon"]) for pt in geometry],
-        })
-    return roads, None
+        return None, info
+    return _parse_roads(data), None
 
 
 def fetch_roads_in_bbox(south: float, west: float, north: float, east: float):
-    """
-    Fetches every OSM road/street in a bbox of ANY size, same any-size
-    tiling + parallel-endpoint-racing strategy as fetch_buildings_in_bbox
-    (same MAX_TILE_AREA_SQKM, same de-duplication-by-id for roads that
-    straddle a tile boundary). Returns (roads, warning_or_None) on success
-    (warning set if some tiles failed but others succeeded), or
-    (None, error_message) if every tile failed.
-    """
-    tiles = _split_bbox_into_tiles(south, west, north, east, MAX_TILE_AREA_SQKM)
-
-    roads_by_id = {}
-    failed_tiles = 0
-    last_error = None
-    for idx, (s, w, n, e) in enumerate(tiles):
-        tile_roads, error = _fetch_roads_one_tile(s, w, n, e)
-        if tile_roads is None:
-            failed_tiles += 1
-            last_error = error
-            logger.warning(f"Road tile {idx + 1}/{len(tiles)} ({s},{w},{n},{e}) failed: {error}")
-        else:
-            for r in tile_roads:
-                roads_by_id[r["osm_id"]] = r  # de-dupe roads that straddle tile edges
-        if idx < len(tiles) - 1:
-            time.sleep(TILE_REQUEST_DELAY_S)
-
-    roads = list(roads_by_id.values())
-
-    if failed_tiles == len(tiles):
-        return None, last_error or "All area tiles failed."
-
-    warning = None
-    if failed_tiles > 0:
-        warning = f"{failed_tiles} of {len(tiles)} area tiles could not be reached for road data -- overlay may be incomplete."
-    return roads, warning
+    """Road centerlines for a bbox of any size, same fixed-grid / cache / failover strategy as
+    fetch_buildings_in_bbox. Returns (roads, warning_or_None) or (None, error_message)."""
+    items, warning = _fetch_tiles(south, west, north, east, _overpass_query_for_roads_bbox, _parse_roads, "Road")
+    if items is None:
+        return None, warning
+    return list(items.values()), warning
 
 
 def latlon_polyline_to_local_meters(latlon_points, origin_lat, origin_lon):

@@ -58,14 +58,11 @@ def _bbox_latlon(fp, origin, margin):
 
 
 def _fetch_osm(bbox):
-    query = osm_detector.build_query(*bbox, timeout=osm_overpass.REQUEST_TIMEOUT_S)
-    errors = []
-    for ep in osm_overpass.OVERPASS_ENDPOINTS:
-        data, err = osm_overpass._query_one_endpoint(ep, query)
-        if data is not None:
-            return data.get("elements", []), None
-        errors.append(err)
-    return None, "; ".join(errors)
+    query = osm_detector.build_query(*bbox, timeout=osm_overpass.QL_TIMEOUT_S)
+    data, info = osm_overpass._race_overpass_query_ex(query)
+    if data is None:
+        return None, info
+    return data.get("elements", []), None
 
 
 def _load_cloud(db, dataset_id):
