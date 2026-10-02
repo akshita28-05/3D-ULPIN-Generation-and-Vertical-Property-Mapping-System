@@ -25,11 +25,10 @@ from sqlalchemy.orm import Session
 from .. import models, auth
 from ..database import get_db
 from . import bulk_import_router
-from ..ingestion import overpass_client
 
 router = APIRouter(prefix="/api/auto", tags=["auto"])
 
-MAX_AREA_SQKM = 25.0  # matches the tiling threshold in ingestion/osm_overpass.py
+MAX_AREA_SQKM = 25.0
 
 
 class AutoRunRequest(BaseModel):
@@ -77,10 +76,3 @@ def auto_run(
     db.refresh(job)
     background_tasks.add_task(bulk_import_router._run_bulk_import, job.id)
     return {"job_id": job.id, "status": job.status, "source": source, "area_sqkm": round(area, 2)}
-
-
-@router.get("/overpass-status")
-def overpass_status(user: models.User = Depends(auth.require_roles("verifier", "admin"))):
-    """Live health of the map-data servers (which are ready / cooling down, latency, last error).
-    Handy to check before a demo or to see why a run was slow."""
-    return {"offline_mode": overpass_client.offline(), "endpoints": overpass_client.status()}

@@ -275,10 +275,12 @@ def _overpass_building_near(lat: float, lon: float, radius_m: int = 100):
     radius_m, or None if nothing is mapped there yet.
     """
     query = f'[out:json][timeout:15];way["building"](around:{radius_m},{lat},{lon});out geom;'
-    from ..ingestion import overpass_client
-    data, info = overpass_client.run_query(query)
-    if data is None:
-        logger.warning(f"Overpass building lookup failed near ({lat},{lon}): {info}")
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"Overpass building lookup failed near ({lat},{lon}): {e}")
         return None
 
     elements = data.get("elements", [])
